@@ -502,8 +502,13 @@ class ExcavatorAPI:
         return []
     
     def start_mining(self, device_id, algorithm, stratum_url, wallet):
-        """Startet Mining."""
+        """Startet Mining (nur wenn nicht bereits aktiv)."""
         try:
+            # Prüfe ob bereits gemined wird
+            if self.is_mining():
+                print(f"ℹ️  Mining läuft bereits - überspringe Start")
+                return True
+                
             print(f"🔧 Konfiguriere Mining...")
             
             # 1. Subscribe zum Stratum
@@ -536,8 +541,12 @@ class ExcavatorAPI:
             return False
     
     def stop_mining(self):
-        """Stoppt Mining."""
+        """Stoppt Mining komplett (alle Worker und Algorithmen)."""
         try:
+            # Prüfe erst ob überhaupt gemined wird
+            if not self.is_mining():
+                return True
+                
             print(f"🔧 Stoppe Mining...")
             
             # 1. Alle Worker entfernen
@@ -565,6 +574,27 @@ class ExcavatorAPI:
             
         except Exception as e:
             print(f"❌ Stop-Fehler: {e}")
+            return False
+    
+    def pause_worker(self, worker_id="0"):
+        """Pausiert einen Worker (sanfter als stop_mining)."""
+        try:
+            result = self.send_command("worker.reset", {"worker_id": worker_id})
+            if result and not result.get("error"):
+                return True
+            return False
+        except:
+            return False
+    
+    def resume_worker(self, worker_id="0"):
+        """Setzt Worker fort (falls bereits konfiguriert)."""
+        try:
+            # Worker ist bereits konfiguriert, nur neu starten
+            result = self.send_command("worker.reset", {"worker_id": worker_id})
+            if result and not result.get("error"):
+                return True
+            return False
+        except:
             return False
     
     def get_info(self):
@@ -595,6 +625,7 @@ class SolarMiningController:
         self.total_mining_time = 0
         self.mining_start_time = None
         self.gpu_paused = False  # Flag für GPU-Pause
+        self.last_weather_data = {}  # Cache für Wetterdaten (immer verfügbar)
     
     def start_excavator(self):
         """Startet Excavator falls nicht bereits laufend."""
@@ -621,6 +652,15 @@ class SolarMiningController:
                 stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NEW_CONSOLE  # Eigenes Fenster
             )
+            
+            # Setze niedrige Prozess-Priorität (Gaming hat Vorrang!)
+            try:
+                import psutil
+                p = psutil.Process(self.excavator_process.pid)
+                p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)  # Windows: Niedrigere Priorität
+                print(f"   ✓ Priorität auf BELOW_NORMAL gesetzt (Gaming-freundlich)")
+            except:
+                pass
             
             # Warte bis API verfügbar ist
             print("   Warte auf API...")
@@ -781,10 +821,31 @@ class SolarMiningController:
                 alarm_2_raw = (await self.bridge.client.get("alarm_2")).value
                 alarm_3_raw = (await self.bridge.client.get("alarm_3")).value
                 
-                # Konvertiere Listen zu int (erstes Element; bei leerer Liste = 0)
-                data['alarm_1'] = alarm_1_raw[0] if (isinstance(alarm_1_raw, list) and len(alarm_1_raw) > 0) else (alarm_1_raw if not isinstance(alarm_1_raw, list) else 0)
-                data['alarm_2'] = alarm_2_raw[0] if (isinstance(alarm_2_raw, list) and len(alarm_2_raw) > 0) else (alarm_2_raw if not isinstance(alarm_2_raw, list) else 0)
-                data['alarm_3'] = alarm_3_raw[0] if (isinstance(alarm_3_raw, list) and len(alarm_3_raw) > 0) else (alarm_3_raw if not isinstance(alarm_3_raw, list) else 0)
+                # Konvertiere zu int (kann Liste, Alarm-Objekt oder String sein!)
+                # Falls es ein Alarm-Objekt ist (mit .id), nehme die ID
+                # Falls es eine Liste ist, nehme erstes Element
+                # Sonst nehme den Wert selbst
+                def extract_alarm_value(alarm_raw):
+                    if alarm_raw is None:
+                        return 0
+                    # Prüfe ob es ein Alarm-Objekt ist (hat 'id' Attribut)
+                    if hasattr(alarm_raw, 'id'):
+                        return alarm_raw.id
+                    # Prüfe ob es eine Liste ist
+                    if isinstance(alarm_raw, list):
+                        if len(alarm_raw) > 0:
+                            # Rekursiv für erstes Element
+                            return extract_alarm_value(alarm_raw[0])
+                        return 0
+                    # Falls es ein String ist (z.B. "Alarm(...)"), ignoriere
+                    if isinstance(alarm_raw, str):
+                        return 0
+                    # Sonst direkt als int
+                    return int(alarm_raw) if alarm_raw else 0
+                
+                data['alarm_1'] = extract_alarm_value(alarm_1_raw)
+                data['alarm_2'] = extract_alarm_value(alarm_2_raw)
+                data['alarm_3'] = extract_alarm_value(alarm_3_raw)
                 data['device_status'] = (await self.bridge.client.get("device_status")).value
             except:
                 pass
@@ -796,49 +857,162 @@ class SolarMiningController:
         return data
     
     async def check_inverter_alarms(self):
-        """Prüft Inverter auf aktive Alarme und loggt sie."""
+        """Prüft Inverter auf aktive Alarme und loggt sie mit vollständigem Kontext."""
         try:
             alarm_1 = await self.bridge.client.get("alarm_1")
             alarm_2 = await self.bridge.client.get("alarm_2")
             alarm_3 = await self.bridge.client.get("alarm_3")
             device_status = await self.bridge.client.get("device_status")
             
-            # Konvertiere zu int (falls Liste, nehme erstes Element; bei leerer Liste = 0)
-            alarm_1_val = alarm_1.value[0] if (isinstance(alarm_1.value, list) and len(alarm_1.value) > 0) else (alarm_1.value if not isinstance(alarm_1.value, list) else 0)
-            alarm_2_val = alarm_2.value[0] if (isinstance(alarm_2.value, list) and len(alarm_2.value) > 0) else (alarm_2.value if not isinstance(alarm_2.value, list) else 0)
-            alarm_3_val = alarm_3.value[0] if (isinstance(alarm_3.value, list) and len(alarm_3.value) > 0) else (alarm_3.value if not isinstance(alarm_3.value, list) else 0)
+            # Hilfsfunktion um Alarm-Wert zu extrahieren
+            def get_alarm_value(alarm_obj):
+                val = alarm_obj.value
+                # Falls Alarm-Objekt in der Liste
+                if isinstance(val, list) and len(val) > 0:
+                    # Prüfe ob Alarm-Objekt (hat 'id')
+                    if hasattr(val[0], 'id'):
+                        return val[0].id, val[0]  # Rückgabe: (ID, Alarm-Objekt)
+                    return int(val[0]) if val[0] else 0, None
+                # Falls direktes Alarm-Objekt
+                if hasattr(val, 'id'):
+                    return val.id, val
+                # Falls leer oder None
+                if not val or (isinstance(val, list) and len(val) == 0):
+                    return 0, None
+                # Sonst als int
+                return int(val) if val else 0, None
             
-            # Prüfe ob Alarme aktiv sind (Bitfeld)
-            has_alarms = (alarm_1_val != 0 or alarm_2_val != 0 or alarm_3_val != 0)
+            alarm_1_val, alarm_1_obj = get_alarm_value(alarm_1)
+            alarm_2_val, alarm_2_obj = get_alarm_value(alarm_2)
+            alarm_3_val, alarm_3_obj = get_alarm_value(alarm_3)
+            
+            # Prüfe ob Alarme aktiv sind (ID != 0 oder Alarm-Objekt vorhanden)
+            has_alarms = (alarm_1_val != 0 or alarm_2_val != 0 or alarm_3_val != 0 or 
+                         alarm_1_obj is not None or alarm_2_obj is not None or alarm_3_obj is not None)
             
             if has_alarms:
                 print(f"\n⚠️  INVERTER ALARM ERKANNT!")
-                error_logger.warning(f"Inverter Alarm: Alarm1={alarm_1_val}, Alarm2={alarm_2_val}, Alarm3={alarm_3_val}")
-                error_logger.warning(f"Device Status: {device_status.value}")
-                print(f"   Alarm 1: {alarm_1_val:016b} (0x{alarm_1_val:04X})")
-                print(f"   Alarm 2: {alarm_2_val:016b} (0x{alarm_2_val:04X})")
-                print(f"   Alarm 3: {alarm_3_val:016b} (0x{alarm_3_val:04X})")
-                print(f"   Status: {device_status.value}\n")
                 
-                # Bekannte Alarm-Bits (Beispiele - Huawei Dokumentation prüfen)
-                alarm_bits = {
-                    0: "Grid Overvoltage",
-                    1: "Grid Undervoltage", 
-                    2: "Grid Overfrequency",
-                    3: "Grid Underfrequency",
-                    4: "PV Overvoltage",
-                    5: "PV Undervoltage",
-                    8: "Isolation Fault",
-                    9: "Temperature Too High",
-                    10: "Fan Fault",
-                    # Weitere Bits je nach Modell
-                }
+                # === VOLLSTÄNDIGER ALARM-KONTEXT SNAPSHOT ===
+                error_logger.error("=" * 80)
+                error_logger.error("🚨 ALARM SNAPSHOT - Vollständige Inverter-Diagnose")
+                error_logger.error("=" * 80)
                 
-                # Parse Alarm 1 Bits
-                for bit, description in alarm_bits.items():
-                    if alarm_1_val & (1 << bit):
-                        print(f"   ⚠️  {description}")
-                        error_logger.error(f"Inverter Alarm: {description}")
+                # Alarm-Details
+                if alarm_1_obj:
+                    error_logger.error(f"Alarm 1: {alarm_1_obj.name} (ID={alarm_1_obj.id}, Level={alarm_1_obj.level})")
+                    print(f"   ⚠️  Alarm 1: {alarm_1_obj.name} (Level: {alarm_1_obj.level})")
+                elif alarm_1_val != 0:
+                    error_logger.warning(f"Alarm 1: Bitfeld = {alarm_1_val:016b} (0x{alarm_1_val:04X})")
+                    print(f"   Alarm 1: {alarm_1_val:016b} (0x{alarm_1_val:04X})")
+                
+                if alarm_2_obj:
+                    error_logger.error(f"Alarm 2: {alarm_2_obj.name} (ID={alarm_2_obj.id}, Level={alarm_2_obj.level})")
+                    print(f"   ⚠️  Alarm 2: {alarm_2_obj.name} (Level: {alarm_2_obj.level})")
+                elif alarm_2_val != 0:
+                    error_logger.warning(f"Alarm 2: Bitfeld = {alarm_2_val:016b} (0x{alarm_2_val:04X})")
+                    print(f"   Alarm 2: {alarm_2_val:016b} (0x{alarm_2_val:04X})")
+                
+                if alarm_3_obj:
+                    error_logger.error(f"Alarm 3: {alarm_3_obj.name} (ID={alarm_3_obj.id}, Level={alarm_3_obj.level})")
+                    print(f"   ⚠️  Alarm 3: {alarm_3_obj.name} (Level: {alarm_3_obj.level})")
+                elif alarm_3_val != 0:
+                    error_logger.warning(f"Alarm 3: Bitfeld = {alarm_3_val:016b} (0x{alarm_3_val:04X})")
+                    print(f"   Alarm 3: {alarm_3_val:016b} (0x{alarm_3_val:04X})")
+                
+                error_logger.error(f"Device Status: {device_status.value}")
+                print(f"   Status: {device_status.value}")
+                
+                # === GRID-STATUS (kritisch bei Grid Overvoltage!) ===
+                try:
+                    error_logger.error("\n📊 GRID-STATUS:")
+                    grid_a_v = await self.bridge.client.get("grid_A_voltage")
+                    grid_b_v = await self.bridge.client.get("grid_B_voltage")
+                    grid_c_v = await self.bridge.client.get("grid_C_voltage")
+                    grid_freq = await self.bridge.client.get("grid_frequency")
+                    line_ab = await self.bridge.client.get("line_voltage_A_B")
+                    line_bc = await self.bridge.client.get("line_voltage_B_C")
+                    line_ca = await self.bridge.client.get("line_voltage_C_A")
+                    
+                    error_logger.error(f"  Phase A: {grid_a_v.value:.1f}V")
+                    error_logger.error(f"  Phase B: {grid_b_v.value:.1f}V")
+                    error_logger.error(f"  Phase C: {grid_c_v.value:.1f}V")
+                    error_logger.error(f"  Frequency: {grid_freq.value:.2f}Hz")
+                    error_logger.error(f"  Line A-B: {line_ab.value:.1f}V")
+                    error_logger.error(f"  Line B-C: {line_bc.value:.1f}V")
+                    error_logger.error(f"  Line C-A: {line_ca.value:.1f}V")
+                except Exception as e:
+                    error_logger.warning(f"  Grid-Daten nicht lesbar: {e}")
+                
+                # === PV-STRING-STATUS ===
+                try:
+                    error_logger.error("\n☀️ PV-STRINGS:")
+                    pv1_v = await self.bridge.client.get("pv_01_voltage")
+                    pv1_a = await self.bridge.client.get("pv_01_current")
+                    pv2_v = await self.bridge.client.get("pv_02_voltage")
+                    pv2_a = await self.bridge.client.get("pv_02_current")
+                    input_power = await self.bridge.client.get("input_power")
+                    
+                    error_logger.error(f"  String 1: {pv1_v.value:.1f}V @ {pv1_a.value:.2f}A = {pv1_v.value * pv1_a.value:.0f}W")
+                    error_logger.error(f"  String 2: {pv2_v.value:.1f}V @ {pv2_a.value:.2f}A = {pv2_v.value * pv2_a.value:.0f}W")
+                    error_logger.error(f"  Total DC Input: {input_power.value:.0f}W")
+                except Exception as e:
+                    error_logger.warning(f"  PV-Daten nicht lesbar: {e}")
+                
+                # === INVERTER-TEMPERATUR ===
+                try:
+                    error_logger.error("\n🌡️ TEMPERATUREN:")
+                    internal_temp = await self.bridge.client.get("internal_temperature")
+                    error_logger.error(f"  Intern: {internal_temp.value:.1f}°C")
+                    
+                    # Falls Multi-Modul Temperaturen verfügbar
+                    try:
+                        inv_a = await self.bridge.client.get("inv_module_A_temp")
+                        inv_b = await self.bridge.client.get("inv_module_B_temp")
+                        inv_c = await self.bridge.client.get("inv_module_C_temp")
+                        error_logger.error(f"  Modul A: {inv_a.value:.1f}°C")
+                        error_logger.error(f"  Modul B: {inv_b.value:.1f}°C")
+                        error_logger.error(f"  Modul C: {inv_c.value:.1f}°C")
+                    except:
+                        pass  # Nicht alle Modelle haben diese
+                except Exception as e:
+                    error_logger.warning(f"  Temperatur-Daten nicht lesbar: {e}")
+                
+                # === ZUSÄTZLICHE FEHLER-CODES ===
+                try:
+                    error_logger.error("\n🔍 FEHLER-DETAILS:")
+                    fault_code = await self.bridge.client.get("fault_code")
+                    error_logger.error(f"  Fault Code: {fault_code.value}")
+                except Exception as e:
+                    error_logger.warning(f"  Fault-Code nicht lesbar: {e}")
+                
+                # === ISOLATIONSWIDERSTAND (kritisch bei Shutdown) ===
+                try:
+                    insulation = await self.bridge.client.get("insulation_resistance")
+                    error_logger.error(f"  Insulation Resistance: {insulation.value:.2f} MΩ")
+                except Exception as e:
+                    error_logger.warning(f"  Isolationswiderstand nicht lesbar: {e}")
+                
+                # === LECKSTROM ===
+                try:
+                    leakage = await self.bridge.client.get("leakage_current_RCD")
+                    error_logger.error(f"  Leakage Current: {leakage.value:.2f} mA")
+                except Exception as e:
+                    error_logger.warning(f"  Leckstrom nicht lesbar: {e}")
+                
+                # === EFFIZIENZ & LEISTUNG ===
+                try:
+                    error_logger.error("\n⚡ LEISTUNG:")
+                    efficiency = await self.bridge.client.get("efficiency")
+                    active_power = await self.bridge.client.get("active_power")
+                    error_logger.error(f"  Efficiency: {efficiency.value:.2f}%")
+                    error_logger.error(f"  Active Power: {active_power.value:.0f}W")
+                except Exception as e:
+                    error_logger.warning(f"  Leistungs-Daten nicht lesbar: {e}")
+                
+                error_logger.error("=" * 80)
+                error_logger.error("")  # Leerzeile für bessere Lesbarkeit
+                print()
                 
                 return True
             
@@ -874,7 +1048,7 @@ class SolarMiningController:
             print("ℹ️  Mining läuft nicht\n")
         
         # Hole initiale Earnings
-        print("� Hole NiceHash Earnings...")
+        print("💰 Hole NiceHash Earnings...")
         earnings = self.nicehash.get_earnings_info()
         if earnings:
             print(f"   Unbezahlt: {self.nicehash.format_btc(earnings['unpaid_btc'])}")
@@ -882,6 +1056,19 @@ class SolarMiningController:
         else:
             print("   ⚠️  Earnings noch nicht verfügbar (Mining gerade gestartet?)")
         print()
+        
+        # Hole initiale Wetterdaten (Cache füllen für CSV!)
+        if self.weather:
+            print("🌤️  Hole initiale Wetterdaten...")
+            initial_weather = self.weather.get_current_weather()
+            if initial_weather:
+                self.last_weather_data = initial_weather
+                print(f"   ✓ Temperatur: {initial_weather.get('temperature_c', 0):.1f}°C")
+                print(f"   ✓ Wolken: {initial_weather.get('cloud_cover_percent', 0):.0f}%")
+                print(f"   ✓ Wind: {initial_weather.get('wind_speed_kmh', 0):.1f} km/h")
+            else:
+                print("   ⚠️  Wetterdaten nicht verfügbar")
+            print()
         
         print("�🔄 Starte Monitoring...\n")
         
@@ -962,10 +1149,14 @@ class SolarMiningController:
                 grid_b_power = grid_b_voltage * grid_b_current
                 grid_c_power = grid_c_voltage * grid_c_current
                 
-                # Hole Wetter-Daten (nur alle 10 Minuten)
-                weather_data = {}
-                if self.weather and iteration % 20 == 0:  # Alle 10 Minuten
-                    weather_data = self.weather.get_current_weather() or {}
+                # Hole Wetter-Daten (API-Call nur alle 10 Minuten, aber Cache immer verwenden!)
+                if self.weather and iteration % 20 == 0:  # Alle 10 Minuten API-Call
+                    new_weather = self.weather.get_current_weather()
+                    if new_weather:
+                        self.last_weather_data = new_weather  # Update Cache
+                
+                # Verwende immer die gecachten Wetterdaten (auch zwischen API-Calls!)
+                weather_data = self.last_weather_data
                 
                 # DATA LOGGING - CSV für Auswertungen/ML
                 try:
@@ -1073,25 +1264,24 @@ class SolarMiningController:
                     gpu_busy, gpu_usage, gpu_process = self.gpu_monitor.get_gpu_usage_by_others()
                     
                     if gpu_busy and not self.gpu_paused:
-                        # GPU wird von anderem Prozess genutzt - Mining pausieren
+                        # GPU wird von anderem Prozess genutzt - STOPPE Mining für maximale Performance
                         print(f"      🎮 GPU von '{gpu_process}' genutzt ({gpu_usage:.0f}%)")
-                        print(f"      ⏸️  PAUSIERE Mining für andere Software...")
+                        print(f"      ⏸️  STOPPE Mining (Gaming hat Priorität!)...")
                         self.excavator.stop_mining()
                         self.gpu_paused = True
                         self.gpu_monitor.set_mining_active(False)  # GPU Monitor informieren
-                        # is_mining bleibt True, nur gepaused
                         
                     elif not gpu_busy and self.gpu_paused:
                         # GPU wieder frei - Mining fortsetzen wenn genug Power
                         print(f"      ✅ GPU wieder frei ({gpu_usage:.0f}%)")
                         if available >= MIN_POWER_TO_KEEP:
-                            print(f"      ▶️  SETZE Mining fort...")
+                            print(f"      ▶️  STARTE Mining neu...")
                             success = self.excavator.start_mining(
                                 DEVICE_ID, ALGORITHM, STRATUM_URL, NICEHASH_WALLET
                             )
                             if success:
                                 self.gpu_paused = False
-                                self.gpu_monitor.set_mining_active(True)  # GPU Monitor informieren
+                                self.gpu_monitor.set_mining_active(True)
                         else:
                             print(f"      ⏸️  Warte auf genug Solar-Power...")
                     
