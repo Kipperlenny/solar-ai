@@ -1,0 +1,27 @@
+# Logs
+logs/
+*.log
+
+# Mining
+dagcache/
+
+# Environment variables (WICHTIG!)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# NiceHash Config
+nhqm.conf
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
