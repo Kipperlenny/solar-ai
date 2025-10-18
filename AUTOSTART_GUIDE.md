@@ -8,7 +8,7 @@
 2. **Type:** `shell:startup` + Enter
 3. **Create Shortcut:**
    - Right-click → "New" → "Shortcut"
-   - Target: `C:\Users\Lennart\test\start_solar_mining.bat`
+   - Target: `C:\path\to\your\solar-ai\start_solar_mining.bat`
    - Name: "Solar Mining System"
 4. **Done!** Script will start on next Windows login
 
@@ -18,10 +18,10 @@ For more control (e.g. delay, admin rights):
 
 ```powershell
 # Run in PowerShell (as Administrator):
-$action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoExit -ExecutionPolicy Bypass -File `"C:\Users\Lennart\test\start_solar_mining.ps1`""
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User "Lennart"
+$action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoExit -ExecutionPolicy Bypass -File `"C:\path\to\your\solar-ai\start_solar_mining.ps1`""
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERNAME"
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-$principal = New-ScheduledTaskPrincipal -UserId "Lennart" -LogonType Interactive -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Highest
 Register-ScheduledTask -TaskName "Solar Mining System" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Starts the Solar Mining System automatically on Windows login"
 ```
 
@@ -37,7 +37,7 @@ If Startup folder doesn't work:
 
 ```powershell
 # PowerShell as Administrator:
-$scriptPath = "C:\Users\Lennart\test\start_solar_mining.bat"
+$scriptPath = "C:\path\to\your\solar-ai\start_solar_mining.bat"
 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "SolarMining" -Value $scriptPath
 ```
 
@@ -54,7 +54,7 @@ Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" 
 
 ### From existing terminal:
 ```powershell
-cd C:\Users\Lennart\test
+cd C:\path\to\your\solar-ai
 .\start_solar_mining.bat
 ```
 

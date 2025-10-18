@@ -180,9 +180,9 @@ Install as service with NSSM:
 
 ```powershell
 # Download NSSM: nssm.cc
-nssm install SolarMining "C:\Users\Lennart\test\.venv\Scripts\python.exe"
-nssm set SolarMining AppParameters "C:\Users\Lennart\test\solar_mining_api.py"
-nssm set SolarMining AppDirectory "C:\Users\Lennart\test"
+nssm install SolarMining "C:\path\to\your\solar-ai\.venv\Scripts\python.exe"
+nssm set SolarMining AppParameters "C:\path\to\your\solar-ai\solar_mining_api.py"
+nssm set SolarMining AppDirectory "C:\path\to\your\solar-ai"
 nssm set SolarMining Start SERVICE_AUTO_START
 
 # Start service

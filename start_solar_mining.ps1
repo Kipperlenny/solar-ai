@@ -2,7 +2,7 @@
 # Startet das Solar Mining System mit sichtbarem Terminal
 
 # Wechsle ins Script-Verzeichnis
-Set-Location -Path "C:\Users\Lennart\test"
+Set-Location -Path $PSScriptRoot
 
 # Aktiviere Virtual Environment und starte Script
 Write-Host "Starte Solar Mining System..." -ForegroundColor Green

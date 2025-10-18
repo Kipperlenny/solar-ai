@@ -8,7 +8,7 @@ echo   Solar Mining System - Autostart
 echo ========================================
 echo.
 
-cd /d "C:\Users\Lennart\test"
+cd /d "%~dp0"
 
 REM Starte PowerShell mit ExecutionPolicy Bypass (für Autostart)
 PowerShell.exe -NoExit -ExecutionPolicy Bypass -File ".\start_solar_mining.ps1"

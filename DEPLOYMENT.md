@@ -172,15 +172,15 @@ from solar_mining_pi import EmailNotifier
 
 # Download NSSM from nssm.ccfrom dotenv import load_dotenv
 
-nssm install SolarMining "C:\Users\Lennart\test\.venv\Scripts\python.exe"load_dotenv()
+nssm install SolarMining "C:\path\to\your\solar-ai\.venv\Scripts\python.exe"load_dotenv()
 
-nssm set SolarMining AppParameters "C:\Users\Lennart\test\solar_mining_api.py"email = EmailNotifier()
+nssm set SolarMining AppParameters "C:\path\to\your\solar-ai\solar_mining_api.py"email = EmailNotifier()
 
-nssm set SolarMining AppDirectory "C:\Users\Lennart\test"if email.enabled:
+nssm set SolarMining AppDirectory "C:\path\to\your\solar-ai"if email.enabled:
 
-nssm set SolarMining AppStdout "C:\Users\Lennart\test\logs\service.log"    email.send_email('Setup-Test', 'Solar Monitoring System erfolgreich installiert!')
+nssm set SolarMining AppStdout "C:\path\to\your\solar-ai\logs\service.log"    email.send_email('Setup-Test', 'Solar Monitoring System erfolgreich installiert!')
 
-nssm set SolarMining AppStderr "C:\Users\Lennart\test\logs\errors.log"    print('✓ Test-E-Mail gesendet!')
+nssm set SolarMining AppStderr "C:\path\to\your\solar-ai\logs\errors.log"    print('✓ Test-E-Mail gesendet!')
 
 nssm set SolarMining Start SERVICE_AUTO_STARTelse:
 
@@ -507,7 +507,7 @@ This creates:
 ### Windows
 
 ```powershell
-cd C:\Users\Lennart\test
+cd C:\path\to\your\solar-ai
 git pull
 pip install -r requirements.txt --upgrade
 
