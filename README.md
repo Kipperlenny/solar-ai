@@ -1,215 +1,219 @@
 # Solar Mining Controller
 
-Automatisches Crypto-Mining mit Solar-Überschuss. Startet Mining nur wenn genug Solarstrom verfügbar ist und pausiert automatisch bei GPU-Nutzung durch andere Programme.
+Automatic crypto mining with solar surplus. Starts mining only when enough solar power is available and automatically pauses when GPU is used by other programs.
 
 ## Features
 
-- ⚡ **Solar-gesteuertes Mining** - Startet/stoppt basierend auf Einspeisung
-- 🎮 **GPU-Monitoring** - Pausiert für Games/Stable Diffusion automatisch
-- 🔄 **Auto-Restart** - Excavator wird bei Problemen neu gestartet
-- 💰 **Earnings Tracking** - Zeigt aktuelle BTC-Verdienste
-- 🌦️ **Wetter-Integration** - Cloud-Cover, Temperatur, Solar-Strahlung (Open-Meteo API)
-- 📊 **Umfassendes Logging** - CSV-Daten für Auswertungen + Error-Logs
+- ⚡ **Solar-controlled Mining** - Starts/stops based on grid feed-in
+- 🎮 **GPU Monitoring** - Pauses automatically for games/Stable Diffusion
+- 🔄 **Auto-Restart** - Excavator restarts automatically on issues
+- 💰 **Earnings Tracking** - Shows current BTC earnings
+- 🌦️ **Weather Integration** - Cloud cover, temperature, solar radiation (Open-Meteo API)
+- 📊 **Comprehensive Logging** - CSV data for analysis + error logs
+- 🌍 **Multilingual** - English/German CLI support (via LANGUAGE environment variable)
 
-## Voraussetzungen
+## Prerequisites
 
 - Python 3.10+
-- Huawei Solar Inverter (SUN2000 Serie) im Netzwerk
-- NiceHash Excavator installiert
-- NVIDIA GPU (1070 Ti getestet)
+- Huawei Solar Inverter (SUN2000 series) on network
+- NiceHash Excavator installed
+- NVIDIA GPU (tested with GTX 1070 Ti)
 
 ## Installation
 
 ```powershell
-# Virtual Environment aktivieren
+# Activate virtual environment
 .venv\Scripts\Activate.ps1
 
-# Pakete installieren
+# Install packages
 pip install huawei-solar GPUtil psutil requests python-dotenv
 ```
 
-## Konfiguration
+## Configuration
 
-**Wichtig:** Konfiguration erfolgt über `.env`-Datei (nicht im Code!)
+**Important:** Configuration is done via `.env` file (not in code!)
 
 ```powershell
-# 1. .env.example zu .env kopieren
+# 1. Copy .env.example to .env
 cp .env.example .env
 
-# 2. .env mit eigenen Werten anpassen
+# 2. Customize .env with your values
 notepad .env
 ```
 
-**Wichtige Einstellungen in `.env`:**
+**Important settings in `.env`:**
 
 ```bash
-# Excavator Pfad
+# Language (Supported: en, de)
+LANGUAGE=en
+
+# Excavator path
 EXCAVATOR_PATH=H:\miner\excavator.exe
 
 # Inverter IP
 INVERTER_HOST=192.168.18.206
 INVERTER_PORT=6607
 
-# NiceHash Wallet (WICHTIG!)
-NICEHASH_WALLET=DEINE_WALLET.worker_name
+# NiceHash Wallet (REQUIRED!)
+NICEHASH_WALLET=YOUR_WALLET.worker_name
 
-# GPS-Koordinaten für Wetter (anpassen!)
+# GPS coordinates for weather (customize!)
 WEATHER_LATITUDE=37.6931
 WEATHER_LONGITUDE=-0.8481
 
-# Power-Schwellwerte (optional anpassen)
+# Power thresholds (optional customization)
 MIN_POWER_TO_START=200
 MIN_POWER_TO_KEEP=150
 CHECK_INTERVAL=30
 ALARM_CHECK_INTERVAL=5
 
-# GPU-Monitoring (optional deaktivieren)
-GPU_CHECK_ENABLED = True
-GPU_USAGE_THRESHOLD = 10   # % - Pause bei GPU-Nutzung
+# GPU monitoring (optional disable)
+GPU_CHECK_ENABLED=True
+GPU_USAGE_THRESHOLD=10   # % - Pause on GPU usage
 
-# Wetter-API (Open-Meteo - kostenlos!)
-WEATHER_ENABLED = True
-WEATHER_LATITUDE = 40.4168    # Deine GPS-Koordinaten
-WEATHER_LONGITUDE = -3.7038
+# Weather API (Open-Meteo - free!)
+WEATHER_ENABLED=True
+WEATHER_LATITUDE=40.4168    # Your GPS coordinates
+WEATHER_LONGITUDE=-3.7038
 ```
 
-## Starten
+## Starting
 
 ```powershell
-# Im Projektordner
+# In project folder
 python solar_mining_api.py
 ```
 
-Das Script:
-1. Startet Excavator automatisch
-2. Verbindet mit Inverter
-3. Überwacht Solar-Einspeisung alle 30s
-4. Startet Mining bei ≥200W Einspeisung (nach 3x Bestätigung)
-5. Stoppt Mining bei <150W (nach 5x Bestätigung)
-6. Pausiert bei GPU-Nutzung durch andere Programme
+The script:
+1. Starts Excavator automatically
+2. Connects to inverter
+3. Monitors solar feed-in every 30s
+4. Starts mining at ≥200W feed-in (after 3x confirmation)
+5. Stops mining at <150W (after 5x confirmation)
+6. Pauses when GPU is used by other programs
 
-**Beenden:** `Ctrl+C`
+**Stop:** `Ctrl+C`
 
-## Ausgabe
+## Output
 
 ```
 [  5] 10:30:00
-      ☀️  Solar:       1250 W
-      🏠 Verbrauch:    480 W (Haus)
-      📤 Einspeisung:  770 W (ins Netz)
-      ✨ Verfügbar:    770 W (für Mining)
-      ⛏️  Mining:      🟢 AKTIV
-      📈 Hashrate:    27.12 MH/s
-      ⏱️  Session:     15m 30s
-      💰 Unbezahlt:   0.00012345 BTC
-      🌡️  Wetter:      23.5°C, ☁️ 35%, ☀️ 680 W/m²
+      ☀️  Solar:        1250 W
+      🏠 Consumption:    480 W (House)
+      📤 Grid Export:    770 W (to grid)
+      ✨ Available:      770 W (for mining)
+      ⛏️  Mining:        🟢 RUNNING
+      📈 Hashrate:      27.12 MH/s
+      ⏱️  Session:       15m 30s
+      💰 Unpaid:        0.00012345 BTC
+      🌡️  Weather:       23.5°C, ☁️ 35%, ☀️ 680 W/m²
 ```
 
 ## Logging
 
-### Daten-Log: `logs/solar_data.csv`
-Alle 30 Sekunden:
-- **Solar:** Produktion, Einspeisung, Verbrauch, String-Daten (PV1/PV2)
-- **Grid:** 3-Phasen Details (Spannung, Strom, Leistung)
-- **Mining:** Status, Hashrate, GPU-Temperatur, GPU-Auslastung
-- **Inverter:** Temperatur, Effizienz, Tages-/Gesamt-Ertrag
-- **Wetter:** Temperatur, Cloud-Cover, Wind, Solar-Strahlung (W/m²)
-- **Batterie:** Lade-/Entladeleistung, State of Charge (falls vorhanden)
+### Data Log: `logs/solar_data.csv`
+Every 30 seconds:
+- **Solar:** Production, feed-in, consumption, string data (PV1/PV2)
+- **Grid:** 3-phase details (voltage, current, power)
+- **Mining:** Status, hashrate, GPU temperature, GPU usage
+- **Inverter:** Temperature, efficiency, daily/total yield
+- **Weather:** Temperature, cloud cover, wind, solar radiation (W/m²)
+- **Battery:** Charge/discharge power, State of Charge (if available)
 
-**Verwendung:**
+**Use for:**
 - Excel/Google Sheets
-- Graphen erstellen (Solar vs. Cloud-Cover!)
-- ML Training (Prognose-Modelle)
-- Langzeit-Analysen
+- Create graphs (Solar vs. cloud cover!)
+- ML training (prediction models)
+- Long-term analysis
 
-### Error-Log: `logs/errors.log`
-Detaillierte Fehler-Informationen:
-- API-Verbindungsprobleme
-- Excavator-Abstürze
-- Inverter-Verbindungsfehler
-- Komplette Tracebacks
+### Error Log: `logs/errors.log`
+Detailed error information:
+- API connection problems
+- Excavator crashes
+- Inverter connection errors
+- Complete tracebacks
 
 ## Tools
 
-### Daten analysieren
+### Analyze Data
 ```powershell
-# Statistiken + Plots (benötigt pandas + matplotlib)
+# Statistics + plots (requires pandas + matplotlib)
 pip install pandas matplotlib
 python analyze_data.py
 ```
 
-Erstellt:
-- `logs/solar_mining_analysis.png` - Übersicht (Solar, Mining, Hashrate, GPU)
-- `logs/daily_pattern.png` - Tages-Muster (stündliche Durchschnitte)
-- `logs/ml_training_data.csv` - Aufbereitet für ML
+Creates:
+- `logs/solar_mining_analysis.png` - Overview (solar, mining, hashrate, GPU)
+- `logs/daily_pattern.png` - Daily patterns (hourly averages)
+- `logs/ml_training_data.csv` - Prepared for ML
 
-### Fehler anzeigen
+### View Errors
 ```powershell
-python view_errors.py        # Letzte 24h
-python view_errors.py 6      # Letzte 6h
+python view_errors.py        # Last 24h
+python view_errors.py 6      # Last 6h
 ```
 
-## GPU-Monitoring
+## GPU Monitoring
 
-Automatische Pause bei:
+Automatic pause for:
 - 🎮 **Gaming**: Rocket League, CS2, Valorant, etc.
-- 🎨 **Stable Diffusion**: Erkennt Python-Prozesse mit SD-Keywords
+- 🎨 **Stable Diffusion**: Detects Python processes with SD keywords
 - 🎬 **Video/3D**: Blender, Premiere, After Effects, etc.
 
-**Eigene Programme hinzufügen:**
+**Add custom programs:**
 ```python
-# In solar_mining_api.py, Zeile ~175
+# In solar_mining_api.py, line ~175
 gpu_intensive_processes = [
     'RocketLeague.exe',
-    'MeinGame.exe',  # <-- Hier hinzufügen
+    'MyGame.exe',  # <-- Add here
 ]
 ```
 
-**Feature deaktivieren:**
-```python
-GPU_CHECK_ENABLED = False
+**Disable feature:**
+```bash
+GPU_CHECK_ENABLED=False
 ```
 
 ## Windows Service (24/7)
 
-Mit NSSM als Service installieren:
+Install as service with NSSM:
 
 ```powershell
-# NSSM herunterladen: nssm.cc
+# Download NSSM: nssm.cc
 nssm install SolarMining "C:\Users\Lennart\test\.venv\Scripts\python.exe"
 nssm set SolarMining AppParameters "C:\Users\Lennart\test\solar_mining_api.py"
 nssm set SolarMining AppDirectory "C:\Users\Lennart\test"
 nssm set SolarMining Start SERVICE_AUTO_START
 
-# Service starten
+# Start service
 nssm start SolarMining
 ```
 
 ## Troubleshooting
 
-### "Excavator antwortet nicht"
-- Excavator wird automatisch neu gestartet
+### "Excavator not responding"
+- Excavator restarts automatically
 - Check: `logs/errors.log`
-- Manuell: Excavator schließen und Script neu starten
+- Manual: Close Excavator and restart script
 
-### "Inverter verbunden" Fehler
-- IP korrekt? `INVERTER_HOST = "192.168.18.206"`
-- Inverter erreichbar? `ping 192.168.18.206`
-- Port offen? Firewall prüfen
+### "Inverter connection" error
+- IP correct? `INVERTER_HOST="192.168.18.206"`
+- Inverter reachable? `ping 192.168.18.206`
+- Port open? Check firewall
 
-### Mining startet nicht
-- Genug Einspeisung? Braucht ≥200W für 3x30s
-- GPU frei? Andere Programme aktiv?
-- Check Console-Ausgabe + `logs/errors.log`
+### Mining doesn't start
+- Enough feed-in? Needs ≥200W for 3x30s
+- GPU free? Other programs active?
+- Check console output + `logs/errors.log`
 
-### CSV-Datei zu groß
+### CSV file too large
 ```powershell
-# Alte Daten archivieren
+# Archive old data
 Move-Item logs\solar_data.csv logs\solar_data_$(Get-Date -Format 'yyyy-MM').csv
-# Neuer CSV-Header wird automatisch erstellt
+# New CSV header will be created automatically
 ```
 
-## Technische Details
+## Technical Details
 
 **Hardware:**
 - Huawei SUN2000-6KTL-L1 Inverter
@@ -220,27 +224,95 @@ Move-Item logs\solar_data.csv logs\solar_data_$(Get-Date -Format 'yyyy-MM').csv
 - Modbus TCP (Port 6607)
 - Excavator API (TCP Port 3456)
 
-**Algorithmus:** DaggerHashimoto (Ethereum)
+**Algorithm:** DaggerHashimoto (Ethereum)
 
-**Hysterese:**
-- 3x Bestätigungen (90s) zum Starten
-- 5x Bestätigungen (150s) zum Stoppen
-- Vermeidet ständiges An/Aus bei schwankender Sonne
+**Hysteresis:**
+- 3x confirmations (90s) to start
+- 5x confirmations (150s) to stop
+- Prevents constant on/off with fluctuating solar
 
-## Dateien
+## Files
 
 ```
 test/
-├── solar_mining_api.py    # Haupt-Script
-├── analyze_data.py        # Daten-Analyse Tool
-├── view_errors.py         # Error-Log Viewer
-├── README.md              # Diese Datei
+├── solar_mining_api.py       # Main script (Windows)
+├── solar_mining_pi.py        # Monitoring script (Raspberry Pi)
+├── solar_core.py             # Shared components
+├── translations.py           # Multilingual support (EN/DE)
+├── analyze_data.py           # Data analysis tool
+├── view_errors.py            # Error log viewer
+├── README.md                 # This file
+├── AUTOSTART_GUIDE.md        # Windows autostart setup
+├── MULTILANG_GUIDE.md        # Multilingual implementation guide
+├── .env                      # Configuration (create from .env.example)
 ├── logs/
-│   ├── solar_data.csv     # Daten-Log
-│   └── errors.log         # Error-Log
-└── .venv/                 # Python Virtual Environment
+│   ├── solar_data.csv        # Data log
+│   └── errors.log            # Error log
+└── .venv/                    # Python virtual environment
 ```
 
-## Lizenz
+## Documentation
 
-Privat-Nutzung. Keine Garantie.
+- **[AUTOSTART_GUIDE.md](AUTOSTART_GUIDE.md)** - Windows autostart setup guide
+- **[MULTILANG_GUIDE.md](MULTILANG_GUIDE.md)** - Multilingual implementation details
+- **[README_RASPBERRY_PI.md](README_RASPBERRY_PI.md)** - Raspberry Pi monitoring setup
+- **[DEPLOYMENT.md](DEPLOYMENT.md)** - Deployment and setup instructions
+- **[QUICKSTART_PI.md](QUICKSTART_PI.md)** - Quick start guide for Raspberry Pi
+
+## Contributing
+
+Contributions are welcome! This project follows professional development standards:
+
+**Code Quality Standards:**
+- ✅ **Language:** All code, comments, and docstrings in English
+- ✅ **Style:** PEP 8 compliant Python
+- ✅ **Architecture:** Follow existing patterns (see `solar_core.py` for shared components)
+- ✅ **Translations:** Add new languages via `translations.py` (see [MULTILANG_GUIDE.md](MULTILANG_GUIDE.md))
+
+**How to Contribute:**
+
+1. **Fork** the repository
+2. **Create** a feature branch
+   ```bash
+   git checkout -b feature/amazing-feature
+   ```
+3. **Make your changes**
+   - Write English code/comments
+   - Add translations if user-facing
+   - Test on your hardware
+4. **Commit** with clear messages
+   ```bash
+   git commit -m 'feat: Add support for XYZ inverter'
+   ```
+5. **Push** to your branch
+   ```bash
+   git push origin feature/amazing-feature
+   ```
+6. **Open** a Pull Request
+
+**Areas for Contribution:**
+- 🔌 Support for other inverter brands (Fronius, SolarEdge, etc.)
+- 🌍 Additional language translations
+- 📊 Enhanced data analysis features
+- 🎮 More GPU-intensive process detection
+- 🐛 Bug fixes and optimizations
+- 📖 Documentation improvements
+
+**Questions?** Open an issue or discussion on GitHub!
+
+## License
+
+**Solar Mining Controller** - Copyright (c) 2025 Lennart Kipper
+
+Licensed under [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+
+**License Summary:**
+- ✅ **Free for personal and hobby use** - Use, modify, and share freely
+- ✅ **Share improvements** - Derivatives must use the same license
+- ✅ **Give credit** - Must attribute original author
+- ❌ **No commercial use** - Cannot sell, monetize, or use commercially
+- 💼 **Commercial licensing available** - Contact author for commercial options
+
+See [LICENSE](LICENSE) for full terms.
+
+**No Warranty:** This software is provided "as is", without warranty of any kind.

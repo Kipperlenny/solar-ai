@@ -1,20 +1,20 @@
 """
-Solar Mining Controller mit GPU-Monitoring
-===========================================
-Automatisches Crypto-Mining basierend auf verfügbarer Solar-Energie.
+Solar Mining Controller with GPU Monitoring
+============================================
+Automatic crypto mining based on available solar energy.
 
 Features:
-- Startet/stoppt Mining basierend auf Solar-Überschuss
-- Pausiert automatisch wenn andere Software die GPU braucht (Gaming, Stable Diffusion, etc.)
-- Excavator API Control (schnelle Start/Stop-Zeiten)
-- NiceHash Earnings Tracking
-- Auto-Start von Excavator
+- Starts/stops mining based on solar surplus
+- Automatically pauses when other software needs GPU (gaming, Stable Diffusion, etc.)
+- Excavator API control (fast start/stop times)
+- NiceHash earnings tracking
+- Auto-start of Excavator
 
 GPU Monitoring:
-- Erkennt wenn andere Prozesse die GPU nutzen (>10% Last)
-- Pausiert Mining automatisch für Rocket League, Stable Diffusion, etc.
-- Setzt Mining fort wenn GPU wieder frei ist
-- GPU_CHECK_ENABLED = True/False um Feature ein/auszuschalten
+- Detects when other processes use the GPU (>10% load)
+- Automatically pauses mining for Rocket League, Stable Diffusion, etc.
+- Resumes mining when GPU is available again
+- GPU_CHECK_ENABLED = True/False to enable/disable feature
 """
 
 import asyncio
@@ -33,46 +33,60 @@ import csv
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Lade .env Datei
+# Import shared components
+from solar_core import (
+    WeatherAPI,
+    InverterConnection,
+    AlarmParser,
+    CSVLogger,
+    AlarmDiagnostics,
+    setup_logging as core_setup_logging,
+    CSV_COLUMNS_FULL
+)
+
+# Import translation system
+from translations import t
+
+# Load .env file
 load_dotenv()
 
-# KONFIGURATION (aus .env)
+# CONFIGURATION (from .env)
 EXCAVATOR_PATH = os.getenv("EXCAVATOR_PATH", r"H:\miner\excavator.exe")
 EXCAVATOR_API_HOST = os.getenv("EXCAVATOR_API_HOST", "127.0.0.1")
 EXCAVATOR_API_PORT = int(os.getenv("EXCAVATOR_API_PORT", "3456"))
 INVERTER_HOST = os.getenv("INVERTER_HOST", "192.168.18.206")
 INVERTER_PORT = int(os.getenv("INVERTER_PORT", "6607"))
 
-# GPU Einstellungen
+# GPU settings
 DEVICE_ID = os.getenv("DEVICE_ID", "0")
 ALGORITHM = os.getenv("ALGORITHM", "daggerhashimoto")
 STRATUM_URL = os.getenv("STRATUM_URL", "nhmp-ssl.eu.nicehash.com:443")
 NICEHASH_WALLET = os.getenv("NICEHASH_WALLET", "YOUR_WALLET_ADDRESS.worker_name")
 
-# NiceHash API (für Earnings)
+# NiceHash API (for earnings)
 NICEHASH_API_URL = "https://api2.nicehash.com/main/api/v2/mining/external"
 
-# Wetter API (Open-Meteo - kostenlos, kein API-Key nötig)
+# Weather API (Open-Meteo - free, no API key needed)
 WEATHER_ENABLED = os.getenv("WEATHER_ENABLED", "True").lower() == "true"
-WEATHER_LATITUDE = float(os.getenv("WEATHER_LATITUDE", "37.6931"))  # Los Nietos, Spanien
+WEATHER_LATITUDE = float(os.getenv("WEATHER_LATITUDE", "37.6931"))  # Los Nietos, Spain
 WEATHER_LONGITUDE = float(os.getenv("WEATHER_LONGITUDE", "-0.8481"))
 WEATHER_API_URL = "https://api.open-meteo.com/v1/forecast"
 
-# Power Schwellwerte
+# Power thresholds
 MIN_POWER_TO_START = int(os.getenv("MIN_POWER_TO_START", "200"))
 MIN_POWER_TO_KEEP = int(os.getenv("MIN_POWER_TO_KEEP", "150"))
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "30"))
 ALARM_CHECK_INTERVAL = int(os.getenv("ALARM_CHECK_INTERVAL", "5"))
 
-# Hysterese
+# Hysteresis
 START_CONFIRMATIONS_NEEDED = int(os.getenv("START_CONFIRMATIONS_NEEDED", "3"))
 STOP_CONFIRMATIONS_NEEDED = int(os.getenv("STOP_CONFIRMATIONS_NEEDED", "5"))
 
-# GPU Nutzungs-Monitoring
+# GPU usage monitoring
 GPU_USAGE_THRESHOLD = int(os.getenv("GPU_USAGE_THRESHOLD", "10"))
 GPU_CHECK_ENABLED = os.getenv("GPU_CHECK_ENABLED", "True").lower() == "true"
 
-# LOGGING KONFIGURATION
+# LOGGING CONFIGURATION
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 ERROR_LOG_FILE = LOG_DIR / "errors.log"
@@ -89,7 +103,7 @@ error_logger.addHandler(error_handler)
 
 # Data Logger Setup
 def init_data_log():
-    """Initialisiert CSV-Datei für Datenlogging falls nicht existiert."""
+    """Initialize CSV file for data logging if it doesn't exist."""
     if not DATA_LOG_FILE.exists():
         with open(DATA_LOG_FILE, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
@@ -156,81 +170,7 @@ def init_data_log():
 
 init_data_log()
 
-
-class WeatherAPI:
-    """Open-Meteo Weather API - kostenlos, kein API-Key."""
-    
-    def __init__(self, latitude, longitude):
-        self.latitude = latitude
-        self.longitude = longitude
-        self.api_url = WEATHER_API_URL
-        self.last_data = None
-        self.last_fetch = None
-        
-    def get_current_weather(self):
-        """
-        Holt aktuelles Wetter inkl. Solar-Radiation.
-        Cache: 10 Minuten (API ist nur alle 15min aktuell).
-        """
-        # Cache prüfen (10 Minuten)
-        if self.last_data and self.last_fetch:
-            age = (datetime.now() - self.last_fetch).total_seconds()
-            if age < 600:  # 10 Minuten
-                return self.last_data
-        
-        try:
-            params = {
-                'latitude': self.latitude,
-                'longitude': self.longitude,
-                'current': [
-                    'temperature_2m',
-                    'cloud_cover',
-                    'wind_speed_10m',
-                    'precipitation',
-                ],
-                'hourly': [
-                    'global_tilted_irradiance',
-                    'direct_radiation',
-                    'diffuse_radiation'
-                ],
-                'timezone': 'auto',
-                'forecast_days': 1
-            }
-            
-            response = requests.get(self.api_url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Aktuelle Wetterdaten
-                current = data.get('current', {})
-                
-                # Solar Radiation (aktuellste Stunde)
-                hourly = data.get('hourly', {})
-                current_hour_index = 0  # Erste Stunde ist aktuelle
-                
-                result = {
-                    'temperature_c': current.get('temperature_2m', 0),
-                    'cloud_cover_percent': current.get('cloud_cover', 0),
-                    'wind_speed_kmh': current.get('wind_speed_10m', 0),
-                    'precipitation_mm': current.get('precipitation', 0),
-                    'global_radiation_wm2': hourly.get('global_tilted_irradiance', [0])[current_hour_index],
-                    'direct_radiation_wm2': hourly.get('direct_radiation', [0])[current_hour_index],
-                    'diffuse_radiation_wm2': hourly.get('diffuse_radiation', [0])[current_hour_index],
-                }
-                
-                self.last_data = result
-                self.last_fetch = datetime.now()
-                return result
-            else:
-                error_logger.warning(f"Weather API HTTP {response.status_code}")
-                return None
-                
-        except Exception as e:
-            error_logger.error(f"Weather API Fehler: {e}")
-            error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
-            return None
-
+# WeatherAPI wird jetzt aus solar_core importiert (siehe oben)
 
 class NiceHashAPI:
     """NiceHash API für Earnings/Stats."""
@@ -369,9 +309,9 @@ class GPUMonitor:
                         if total_gpu_load > self.threshold:
                             return True, total_gpu_load, proc_name
                     
-                    # Spezialfall: python.exe - prüfe ob es NICHT unser Script ist
+                    # Special case: python.exe - check if it's NOT our script
                     if 'python' in proc_name.lower() and total_gpu_load > 30:
-                        # Prüfe Kommandozeile für Stable Diffusion Hinweise
+                        # Check command line for Stable Diffusion indicators
                         try:
                             cmdline = ' '.join(proc.cmdline())
                             sd_keywords = ['stable-diffusion', 'comfy', 'automatic1111', 'invoke', 'diffusers', 'torch']
@@ -383,19 +323,19 @@ class GPUMonitor:
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
             
-            # WICHTIG: Wenn Mining aktiv ist, ist hohe GPU-Last NORMAL
-            # Pausiere nur bei >80% UND Mining ist NICHT aktiv
-            # Das vermeidet false positives vom Miner selbst
+            # IMPORTANT: When mining is active, high GPU load is NORMAL
+            # Only pause at >80% AND mining is NOT active
+            # This avoids false positives from the miner itself
             if not self.mining_active and total_gpu_load > 80:
                 return True, total_gpu_load, "Unknown GPU-intensive Process"
             
             return False, total_gpu_load, None
             
         except Exception as e:
-            error_logger.error(f"GPU Monitoring Fehler: {e}")
+            error_logger.error(f"GPU monitoring error: {e}")
             error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
             error_logger.debug(f"GPU ID: {self.gpu_id}, Threshold: {self.threshold}, Mining Active: {self.mining_active}")
-            print(f"⚠️ GPU Monitoring Fehler: {e}")
+            print(f"⚠️ {t('gpu_monitoring_error')}: {e}")
             return False, 0, None
 
 
@@ -469,21 +409,21 @@ class ExcavatorAPI:
                     time.sleep(0.5)
                     continue
         
-        # Alle Retries fehlgeschlagen
+        # All retries failed
         self.consecutive_errors += 1
         
-        # Detailliertes Error-Logging
-        error_logger.error(f"Excavator API Fehler ({self.consecutive_errors}x): {last_error}")
+        # Detailed error logging
+        error_logger.error(f"Excavator API error ({self.consecutive_errors}x): {last_error}")
         error_logger.debug(f"Method: {method}, Params: {params}, Retries: {retries}")
         error_logger.debug(f"Host: {self.host}, Port: {self.port}, Command ID: {self.cmd_id-1}")
         error_logger.debug(f"Last successful command: {self.last_successful_command}")
         
-        # Nur jeden 10. Fehler ausgeben um Spam zu vermeiden
+        # Only print every 10th error to avoid spam
         if self.consecutive_errors == 1 or self.consecutive_errors % 10 == 0:
-            print(f"⚠️  API Fehler ({self.consecutive_errors}x): {last_error}")
+            print(f"⚠️  {t('api_error', count=self.consecutive_errors)}: {last_error}")
             if self.consecutive_errors >= 30:
-                print(f"⚠️  Excavator antwortet nicht! Prozess neu starten?")
-                error_logger.warning(f"Excavator antwortet seit {self.consecutive_errors} Versuchen nicht mehr!")
+                print(f"⚠️  {t('excavator_not_responding')}")
+                error_logger.warning(f"Excavator not responding for {self.consecutive_errors} attempts!")
         
         return None
     
@@ -502,78 +442,87 @@ class ExcavatorAPI:
         return []
     
     def start_mining(self, device_id, algorithm, stratum_url, wallet):
-        """Startet Mining (nur wenn nicht bereits aktiv)."""
+        """Start mining (only if not already active)."""
         try:
-            # Prüfe ob bereits gemined wird
+            # Check if already mining
             if self.is_mining():
-                print(f"ℹ️  Mining läuft bereits - überspringe Start")
+                print(f"ℹ️  {t('mining_already_running')}")
                 return True
                 
-            print(f"🔧 Konfiguriere Mining...")
+            print(f"🔧 {t('configuring_mining')}")
             
-            # 1. Subscribe zum Stratum
+            # 1. Subscribe to stratum
             result = self.send_command("subscribe", [stratum_url, wallet])
-            if result and result.get("error"):
-                print(f"❌ Subscribe Fehler: {result['error']}")
+            if result is None:
+                print(f"❌ {t('subscribe_no_response')}")
                 return False
-            print(f"   ✓ Subscribe erfolgreich")
+            if result.get("error"):
+                print(f"❌ {t('subscribe_error')}: {result['error']}")
+                return False
+            print(f"   ✓ {t('subscribe_success')}")
             
-            # 2. Algorithm hinzufügen
+            # 2. Add algorithm
             result = self.send_command("algorithm.add", [algorithm])
-            if result and result.get("error"):
-                print(f"❌ Algorithm Fehler: {result['error']}")
+            if result is None:
+                print(f"❌ {t('algorithm_no_response')}")
                 return False
-            print(f"   ✓ Algorithm '{algorithm}' hinzugefügt")
+            if result.get("error"):
+                print(f"❌ {t('algorithm_error')}: {result['error']}")
+                return False
+            print(f"   ✓ {t('algorithm_added', algo=algorithm)}")
             
-            # 3. Worker hinzufügen (GPU mining starten)
+            # 3. Add worker (start GPU mining)
             result = self.send_command("worker.add", [algorithm, device_id])
-            if result and result.get("error"):
-                print(f"❌ Worker Fehler: {result['error']}")
+            if result is None:
+                print(f"❌ {t('worker_no_response')}")
+                return False
+            if result.get("error"):
+                print(f"❌ {t('worker_error')}: {result['error']}")
                 return False
             
             worker_id = result.get("worker_id", 0)
-            print(f"   ✓ Worker {worker_id} gestartet")
+            print(f"   ✓ {t('worker_started', id=worker_id)}")
             
             return True
             
         except Exception as e:
-            print(f"❌ Start-Fehler: {e}")
+            print(f"❌ {t('start_error')}: {e}")
             return False
     
     def stop_mining(self):
-        """Stoppt Mining komplett (alle Worker und Algorithmen)."""
+        """Stop mining completely (all workers and algorithms)."""
         try:
-            # Prüfe erst ob überhaupt gemined wird
+            # Check if mining at all
             if not self.is_mining():
                 return True
                 
-            print(f"🔧 Stoppe Mining...")
+            print(f"🔧 {t('stopping_mining')}")
             
-            # 1. Alle Worker entfernen
+            # 1. Clear all workers
             result = self.send_command("worker.clear")
             if result and result.get("error"):
-                print(f"⚠️  Worker clear Fehler: {result['error']}")
+                print(f"⚠️  {t('worker_error')}: {result['error']}")
             else:
-                print(f"   ✓ Alle Worker gestoppt")
+                print(f"   ✓ {t('workers_cleared')}")
             
-            # 2. Alle Algorithmen entfernen
+            # 2. Clear all algorithms
             result = self.send_command("algorithm.clear")
             if result and result.get("error"):
-                print(f"⚠️  Algorithm clear Fehler: {result['error']}")
+                print(f"⚠️  {t('algorithm_error')}: {result['error']}")
             else:
-                print(f"   ✓ Algorithms entfernt")
+                print(f"   ✓ {t('algorithms_cleared')}")
             
-            # 3. Von Stratum trennen
+            # 3. Disconnect from stratum
             result = self.send_command("unsubscribe")
             if result and result.get("error"):
-                print(f"⚠️  Unsubscribe Fehler: {result['error']}")
+                print(f"⚠️  {t('unsubscribe_error')}: {result['error']}")
             else:
-                print(f"   ✓ Von Stratum getrennt")
+                print(f"   ✓ {t('disconnected_from_stratum')}")
             
             return True
             
         except Exception as e:
-            print(f"❌ Stop-Fehler: {e}")
+            print(f"❌ {t('stop_error')}: {e}")
             return False
     
     def pause_worker(self, worker_id="0"):
@@ -628,101 +577,101 @@ class SolarMiningController:
         self.last_weather_data = {}  # Cache für Wetterdaten (immer verfügbar)
     
     def start_excavator(self):
-        """Startet Excavator falls nicht bereits laufend."""
-        # Prüfe ob Excavator schon läuft
+        """Start Excavator if not already running."""
+        # Check if Excavator is already running
         info = self.excavator.get_info()
         if info:
-            print(f"ℹ️  Excavator läuft bereits (Version {info.get('version', 'unknown')})")
+            print(f"ℹ️  {t('excavator_already_running', version=info.get('version', 'unknown'))}")
             return True
         
-        # Prüfe ob excavator.exe existiert
+        # Check if excavator.exe exists
         if not os.path.exists(EXCAVATOR_PATH):
-            print(f"❌ Excavator nicht gefunden: {EXCAVATOR_PATH}")
-            print(f"   Bitte EXCAVATOR_PATH in der Konfiguration anpassen!")
+            print(f"❌ {t('excavator_not_found')}: {EXCAVATOR_PATH}")
+            print(f"   {t('please_adjust_path')}")
             return False
         
         try:
-            print(f"🚀 Starte Excavator: {EXCAVATOR_PATH}")
-            print(f"   API Port: {EXCAVATOR_API_PORT}")
+            print(f"🚀 {t('starting_excavator')}: {EXCAVATOR_PATH}")
+            print(f"   {t('api_port')}: {EXCAVATOR_API_PORT}")
             
-            # Starte Excavator im Hintergrund
+            # Start Excavator in background
             self.excavator_process = subprocess.Popen(
                 [EXCAVATOR_PATH, "-p", str(EXCAVATOR_API_PORT)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NEW_CONSOLE  # Eigenes Fenster
+                creationflags=subprocess.CREATE_NEW_CONSOLE  # Own window
             )
             
-            # Setze niedrige Prozess-Priorität (Gaming hat Vorrang!)
+            # Set low process priority (gaming has priority!)
             try:
                 import psutil
                 p = psutil.Process(self.excavator_process.pid)
-                p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)  # Windows: Niedrigere Priorität
-                print(f"   ✓ Priorität auf BELOW_NORMAL gesetzt (Gaming-freundlich)")
+                p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)  # Windows: Lower priority
+                print(f"   ✓ {t('priority_set')}")
             except:
                 pass
             
-            # Warte bis API verfügbar ist
-            print("   Warte auf API...")
-            for i in range(30):  # Max 30 Sekunden warten
+            # Wait until API is available
+            print(f"   {t('waiting_for_api')}")
+            for i in range(30):  # Max 30 seconds wait
                 time.sleep(1)
                 info = self.excavator.get_info()
                 if info:
-                    print(f"✅ Excavator gestartet! Version: {info.get('version', 'unknown')}")
-                    # Speichere PID für GPU Monitoring
+                    print(f"✅ {t('excavator_started', version=info.get('version', 'unknown'))}")
+                    # Save PID for GPU monitoring
                     self.gpu_monitor.set_excavator_pid(self.excavator_process.pid)
-                    print(f"   PID: {self.excavator_process.pid}")
+                    print(f"   {t('pid')}: {self.excavator_process.pid}")
                     return True
                 if i % 5 == 0 and i > 0:
-                    print(f"   Noch {30-i}s...")
+                    print(f"   {t('remaining_seconds', seconds=30-i)}")
             
-            print("❌ Excavator API nicht erreichbar nach 30s")
-            error_logger.error("Excavator API nicht erreichbar nach 30s")
+            print(f"❌ {t('excavator_start_timeout')}")
+            error_logger.error("Excavator API not reachable after 30s")
             error_logger.debug(f"Excavator Path: {EXCAVATOR_PATH}")
             error_logger.debug(f"API Host: {self.excavator.host}, Port: {self.excavator.port}")
             error_logger.debug(f"Process PID: {self.excavator_process.pid if self.excavator_process else 'None'}")
             return False
             
         except Exception as e:
-            print(f"❌ Fehler beim Starten von Excavator: {e}")
-            error_logger.error(f"Fehler beim Starten von Excavator: {e}")
+            print(f"❌ {t('excavator_start_error')}: {e}")
+            error_logger.error(f"Excavator start error: {e}")
             error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
             error_logger.debug(f"Excavator Path exists: {os.path.exists(EXCAVATOR_PATH)}")
             return False
     
     def check_excavator_health(self):
-        """Prüft ob Excavator noch antwortet und startet neu falls nötig."""
-        # Prüfe ob API antwortet
+        """Check if Excavator is still responding and restart if necessary."""
+        # Check if API responds
         info = self.excavator.get_info()
         
         if info:
-            # Alles OK
+            # All OK
             return True
         
-        # API antwortet nicht - prüfe ob Prozess noch läuft
+        # API not responding - check if process still running
         if self.excavator_process and self.excavator_process.poll() is None:
-            # Prozess läuft noch, aber API antwortet nicht
+            # Process still running but API not responding
             if self.excavator.consecutive_errors >= 30:
-                print("\n⚠️  Excavator Prozess läuft, aber API antwortet nicht!")
-                print("   Beende alten Prozess und starte neu...")
-                error_logger.warning("Excavator Prozess läuft, aber API antwortet nicht - Neustart")
+                print(f"\n⚠️  {t('excavator_process_not_responding')}")
+                print(f"   {t('terminating_old_process')}")
+                error_logger.warning("Excavator process running but API not responding - restarting")
                 error_logger.debug(f"PID: {self.excavator_process.pid}, Consecutive Errors: {self.excavator.consecutive_errors}")
                 try:
                     self.excavator_process.terminate()
                     self.excavator_process.wait(timeout=5)
                 except Exception as e:
-                    error_logger.error(f"Fehler beim Beenden von Excavator: {e}")
+                    error_logger.error(f"Error terminating Excavator: {e}")
                     self.excavator_process.kill()
                 
                 self.excavator_process = None
                 self.excavator.consecutive_errors = 0
                 return self.start_excavator()
         else:
-            # Prozess ist abgestürzt
+            # Process crashed
             if self.excavator.consecutive_errors >= 10:
-                print("\n⚠️  Excavator Prozess ist abgestürzt!")
-                print("   Starte Excavator neu...")
-                error_logger.error("Excavator Prozess ist abgestürzt - Neustart")
+                print(f"\n⚠️  {t('excavator_crashed')}")
+                print(f"   {t('restarting_excavator')}")
+                error_logger.error("Excavator process crashed - restarting")
                 error_logger.debug(f"Consecutive Errors: {self.excavator.consecutive_errors}")
                 self.excavator_process = None
                 self.excavator.consecutive_errors = 0
@@ -731,43 +680,43 @@ class SolarMiningController:
         return False
         
     async def connect(self):
-        """Verbinde mit Inverter."""
+        """Connect to inverter."""
         try:
-            print(f"🔌 Verbinde mit Inverter {INVERTER_HOST}:{INVERTER_PORT}...")
+            print(f"🔌 {t('connecting_to_inverter')} {INVERTER_HOST}:{INVERTER_PORT}...")
             self.bridge = await HuaweiSolarBridge.create(INVERTER_HOST, port=INVERTER_PORT)
-            print("✅ Inverter verbunden!")
+            print(f"✅ {t('inverter_connection_success')}")
         except Exception as e:
-            error_logger.error(f"Fehler beim Verbinden mit Inverter: {e}")
+            error_logger.error(f"Error connecting to inverter: {e}")
             error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
             error_logger.debug(f"Host: {INVERTER_HOST}, Port: {INVERTER_PORT}")
             raise
         
-        # Starte Excavator falls nötig
-        print(f"\n🔌 Prüfe Excavator API auf {EXCAVATOR_API_HOST}:{EXCAVATOR_API_PORT}...")
+        # Start Excavator if needed
+        print(f"\n🔌 {t('checking_excavator_api')} {EXCAVATOR_API_HOST}:{EXCAVATOR_API_PORT}...")
         if not self.start_excavator():
-            raise Exception("Excavator konnte nicht gestartet werden!")
+            raise Exception(t('excavator_could_not_start'))
     
     async def get_available_solar_power(self):
-        """Lese verfügbare Solarleistung."""
+        """Read available solar power."""
         try:
             solar_power = await self.bridge.client.get("input_power")
             house_power = await self.bridge.client.get("power_meter_active_power")
             
-            # Verfügbare Power = Einspeisung (nur das was übrig ist!)
-            # house_power > 0: Einspeisung ins Netz (verfügbar für Mining)
-            # house_power < 0: Netzbezug (nichts verfügbar, ziehen schon aus Netz)
-            available = max(0, house_power.value)  # Nur positive Einspeisung zählt
+            # Available power = feed-in (only what's left!)
+            # house_power > 0: Feed-in to grid (available for mining)
+            # house_power < 0: Grid import (nothing available, already drawing from grid)
+            available = max(0, house_power.value)  # Only positive feed-in counts
             
             return solar_power.value, house_power.value, available
         except Exception as e:
-            error_logger.error(f"Fehler beim Lesen von Solar-Daten: {e}")
+            error_logger.error(f"Error reading solar data: {e}")
             error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
             error_logger.debug(f"Bridge connected: {self.bridge is not None}")
-            print(f"❌ Fehler beim Lesen: {e}")
+            print(f"❌ {t('reading_error')}: {e}")
             return 0, 0, 0
     
     async def get_all_inverter_data(self):
-        """Liest ALLE verfügbaren Inverter-Daten aus."""
+        """Read ALL available inverter data."""
         data = {}
         try:
             # Basis Solar-Daten
@@ -821,31 +770,10 @@ class SolarMiningController:
                 alarm_2_raw = (await self.bridge.client.get("alarm_2")).value
                 alarm_3_raw = (await self.bridge.client.get("alarm_3")).value
                 
-                # Konvertiere zu int (kann Liste, Alarm-Objekt oder String sein!)
-                # Falls es ein Alarm-Objekt ist (mit .id), nehme die ID
-                # Falls es eine Liste ist, nehme erstes Element
-                # Sonst nehme den Wert selbst
-                def extract_alarm_value(alarm_raw):
-                    if alarm_raw is None:
-                        return 0
-                    # Prüfe ob es ein Alarm-Objekt ist (hat 'id' Attribut)
-                    if hasattr(alarm_raw, 'id'):
-                        return alarm_raw.id
-                    # Prüfe ob es eine Liste ist
-                    if isinstance(alarm_raw, list):
-                        if len(alarm_raw) > 0:
-                            # Rekursiv für erstes Element
-                            return extract_alarm_value(alarm_raw[0])
-                        return 0
-                    # Falls es ein String ist (z.B. "Alarm(...)"), ignoriere
-                    if isinstance(alarm_raw, str):
-                        return 0
-                    # Sonst direkt als int
-                    return int(alarm_raw) if alarm_raw else 0
-                
-                data['alarm_1'] = extract_alarm_value(alarm_1_raw)
-                data['alarm_2'] = extract_alarm_value(alarm_2_raw)
-                data['alarm_3'] = extract_alarm_value(alarm_3_raw)
+                # Verwende AlarmParser aus solar_core
+                data['alarm_1'] = AlarmParser.extract_alarm_value(alarm_1_raw)
+                data['alarm_2'] = AlarmParser.extract_alarm_value(alarm_2_raw)
+                data['alarm_3'] = AlarmParser.extract_alarm_value(alarm_3_raw)
                 data['device_status'] = (await self.bridge.client.get("device_status")).value
             except:
                 pass
@@ -864,38 +792,21 @@ class SolarMiningController:
             alarm_3 = await self.bridge.client.get("alarm_3")
             device_status = await self.bridge.client.get("device_status")
             
-            # Hilfsfunktion um Alarm-Wert zu extrahieren
-            def get_alarm_value(alarm_obj):
-                val = alarm_obj.value
-                # Falls Alarm-Objekt in der Liste
-                if isinstance(val, list) and len(val) > 0:
-                    # Prüfe ob Alarm-Objekt (hat 'id')
-                    if hasattr(val[0], 'id'):
-                        return val[0].id, val[0]  # Rückgabe: (ID, Alarm-Objekt)
-                    return int(val[0]) if val[0] else 0, None
-                # Falls direktes Alarm-Objekt
-                if hasattr(val, 'id'):
-                    return val.id, val
-                # Falls leer oder None
-                if not val or (isinstance(val, list) and len(val) == 0):
-                    return 0, None
-                # Sonst als int
-                return int(val) if val else 0, None
+            # Verwende AlarmParser aus solar_core
+            alarm_1_val, alarm_1_obj = AlarmParser.get_alarm_details(alarm_1)
+            alarm_2_val, alarm_2_obj = AlarmParser.get_alarm_details(alarm_2)
+            alarm_3_val, alarm_3_obj = AlarmParser.get_alarm_details(alarm_3)
             
-            alarm_1_val, alarm_1_obj = get_alarm_value(alarm_1)
-            alarm_2_val, alarm_2_obj = get_alarm_value(alarm_2)
-            alarm_3_val, alarm_3_obj = get_alarm_value(alarm_3)
-            
-            # Prüfe ob Alarme aktiv sind (ID != 0 oder Alarm-Objekt vorhanden)
+            # Check if alarms are active (ID != 0 or alarm object present)
             has_alarms = (alarm_1_val != 0 or alarm_2_val != 0 or alarm_3_val != 0 or 
                          alarm_1_obj is not None or alarm_2_obj is not None or alarm_3_obj is not None)
             
             if has_alarms:
-                print(f"\n⚠️  INVERTER ALARM ERKANNT!")
+                print(f"\n⚠️  {t('alarm_warning')}")
                 
-                # === VOLLSTÄNDIGER ALARM-KONTEXT SNAPSHOT ===
+                # === COMPLETE ALARM CONTEXT SNAPSHOT ===
                 error_logger.error("=" * 80)
-                error_logger.error("🚨 ALARM SNAPSHOT - Vollständige Inverter-Diagnose")
+                error_logger.error("🚨 ALARM SNAPSHOT - Complete Inverter Diagnostics")
                 error_logger.error("=" * 80)
                 
                 # Alarm-Details
@@ -1024,9 +935,9 @@ class SolarMiningController:
             return False
     
     async def run(self):
-        """Hauptschleife."""
+        """Main loop."""
         print("=" * 80)
-        print("⚡ SOLAR MINING CONTROLLER (Excavator API)")
+        print(f"⚡ {t('system_title').upper()}")
         print("=" * 80)
         print(f"GPU Device: {DEVICE_ID}")
         print(f"Algorithm: {ALGORITHM}")
@@ -1227,15 +1138,15 @@ class SolarMiningController:
                     error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
                 
                 print(f"[{iteration:3d}] {now}")
-                print(f"      ☀️  Solar:       {solar:>6.0f} W")
+                print(f"      ☀️  {t('solar_production')}:       {solar:>6.0f} W")
                 if house > 0:
-                    print(f"      🏠 Verbrauch:   {actual_house_consumption:>6.0f} W (Haus)")
-                    print(f"      📤 Einspeisung: {house:>6.0f} W (ins Netz)")
+                    print(f"      🏠 {t('consumption')}:   {actual_house_consumption:>6.0f} W {t('house_consumption')}")
+                    print(f"      📤 {t('grid_export')}: {house:>6.0f} W {t('to_grid')}")
                 else:
-                    print(f"      🏠 Verbrauch:   {actual_house_consumption:>6.0f} W (Haus)")
-                    print(f"      📥 Netzbezug:   {abs(house):>6.0f} W (aus Netz)")
-                print(f"      ✨ Verfügbar:   {available:>6.0f} W (für Mining)")
-                print(f"      ⛏️  Mining:      {'🟢 AKTIV' if self.is_mining else '🔴 GESTOPPT'}")
+                    print(f"      🏠 {t('consumption')}:   {actual_house_consumption:>6.0f} W {t('house_consumption')}")
+                    print(f"      📥 {t('grid_import')}:   {abs(house):>6.0f} W {t('from_grid')}")
+                print(f"      ✨ {t('available_power')}:   {available:>6.0f} W {t('for_mining')}")
+                print(f"      ⛏️  {t('mining_status')}:      {'🟢 ' + t('mining_running') if self.is_mining else '🔴 ' + t('mining_stopped')}")
                 if hashrate > 0:
                     print(f"      📈 Hashrate:    {hashrate/1e6:.2f} MH/s")
                 if session_time > 0:
