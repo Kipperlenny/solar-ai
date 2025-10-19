@@ -680,16 +680,87 @@ class SolarMiningController:
         return False
         
     async def connect(self):
-        """Connect to inverter."""
-        try:
-            print(f"🔌 {t('connecting_to_inverter')} {INVERTER_HOST}:{INVERTER_PORT}...")
-            self.bridge = await HuaweiSolarBridge.create(INVERTER_HOST, port=INVERTER_PORT)
-            print(f"✅ {t('inverter_connection_success')}")
-        except Exception as e:
-            error_logger.error(f"Error connecting to inverter: {e}")
-            error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
-            error_logger.debug(f"Host: {INVERTER_HOST}, Port: {INVERTER_PORT}")
-            raise
+        """Connect to inverter with unlimited retry logic."""
+        RETRY_DELAY = 30  # seconds between retries
+        CONNECTION_TIMEOUT = 60  # seconds for each connection attempt
+        
+        attempt = 0
+        
+        # Initial hint
+        print()
+        print("⚠️  HINWEIS: Falls die Verbindung fehlschlägt:")
+        print("   → Schließe FusionSolar App und andere Monitoring-Software")
+        print("   → Nur EIN Programm sollte gleichzeitig auf den Inverter zugreifen")
+        print()
+        
+        while True:  # Infinite retry loop
+            attempt += 1
+            try:
+                print(f"🔌 {t('connecting_to_inverter')} {INVERTER_HOST}:{INVERTER_PORT}... (Versuch {attempt})")
+                
+                # Wrap connection with timeout to prevent infinite hangs
+                self.bridge = await asyncio.wait_for(
+                    HuaweiSolarBridge.create(INVERTER_HOST, port=INVERTER_PORT),
+                    timeout=CONNECTION_TIMEOUT
+                )
+                
+                print(f"✅ {t('inverter_connection_success')}")
+                
+                # Test connection with a simple read
+                try:
+                    test_read = await asyncio.wait_for(
+                        self.bridge.client.get("input_power"),
+                        timeout=10
+                    )
+                    print(f"✅ Verbindungstest erfolgreich (Solar: {test_read.value:.0f}W)")
+                    
+                    # If we had retries, warn about Modbus conflicts
+                    if attempt > 1:
+                        print()
+                        print(f"⚠️  WARNUNG: Verbindung erst nach {attempt} Versuchen erfolgreich!")
+                        print("   → Ein anderes Programm greift wahrscheinlich auf den Inverter zu")
+                        print("   → Dies kann zu Instabilität und Datenverlusten führen")
+                        print("   → Empfehlung: Schließe andere Modbus-Clients (FusionSolar App, etc.)")
+                        print()
+                        error_logger.warning(f"Connection successful only after {attempt} attempts - possible Modbus conflict")
+                    
+                except Exception as e:
+                    error_logger.warning(f"Connection test read failed: {e}")
+                    print(f"⚠️  Verbindung hergestellt, aber Test-Read fehlgeschlagen")
+                
+                break  # Successfully connected, exit loop
+                
+            except asyncio.TimeoutError:
+                error_logger.error(f"Connection attempt {attempt} timed out after {CONNECTION_TIMEOUT}s")
+                print(f"⏱️  Timeout nach {CONNECTION_TIMEOUT}s - Inverter antwortet nicht")
+                print(f"⏳ Warte {RETRY_DELAY}s vor erneutem Verbindungsversuch...")
+                if attempt == 1:
+                    print(f"   💡 TIPP: Schließe jetzt FusionSolar App oder andere Monitoring-Software!")
+                await asyncio.sleep(RETRY_DELAY)
+                # Continue loop - no else needed anymore
+                    
+            except Exception as e:
+                error_logger.error(f"Connection attempt {attempt} failed: {e}")
+                error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
+                
+                # Check for specific Modbus conflict errors
+                error_msg = str(e).lower()
+                is_modbus_conflict = (
+                    "interrupted" in error_msg or 
+                    "another device" in error_msg or
+                    "not connected" in error_msg or
+                    "connection" in error_msg
+                )
+                
+                print(f"⏳ Warte {RETRY_DELAY}s vor erneutem Verbindungsversuch...")
+                if is_modbus_conflict:
+                    print(f"   🔴 MODBUS-KONFLIKT ERKANNT!")
+                    print(f"   → Ein anderes Programm greift auf den Inverter zu")
+                    print(f"   → Schließe JETZT: FusionSolar App, Home Assistant, etc.")
+                else:
+                    print(f"   Fehler: {type(e).__name__}")
+                await asyncio.sleep(RETRY_DELAY)
+                # Continue loop
         
         # Start Excavator if needed
         print(f"\n🔌 {t('checking_excavator_api')} {EXCAVATOR_API_HOST}:{EXCAVATOR_API_PORT}...")
@@ -999,11 +1070,40 @@ class SolarMiningController:
                 
                 # Prüfe Inverter Alarme (häufiger als normale Checks!)
                 if current_time - last_alarm_check >= ALARM_CHECK_INTERVAL:
-                    await self.check_inverter_alarms()
-                    last_alarm_check = current_time
+                    try:
+                        await self.check_inverter_alarms()
+                        last_alarm_check = current_time
+                    except Exception as e:
+                        error_logger.error(f"Error checking inverter alarms: {e}")
+                        print(f"⚠️  Alarm-Check fehlgeschlagen (Inverter evtl. offline)")
                 
-                # Lese Solar-Daten
-                solar, house, available = await self.get_available_solar_power()
+                # Lese Solar-Daten (mit Error Handling für Connection Loss)
+                try:
+                    solar, house, available = await self.get_available_solar_power()
+                except Exception as e:
+                    error_logger.error(f"Error reading solar data in main loop: {e}")
+                    print(f"\n⚠️  Verbindung zum Inverter verloren!")
+                    print(f"   Fehler: {type(e).__name__}")
+                    
+                    # Bei Connection-Loss: Mining sicherheitshalber stoppen
+                    if self.is_mining:
+                        print(f"⚠️  Stoppe Mining zur Sicherheit...")
+                        self.excavator.stop_mining()
+                    
+                    # Versuche Reconnect
+                    print(f"🔄 Versuche Wiederverbindung zum Inverter...")
+                    try:
+                        if self.bridge:
+                            await self.bridge.stop()
+                            self.bridge = None
+                    except:
+                        pass
+                    
+                    # Reconnect mit retry logic (ruft connect() auf, die unbegrenzt versucht)
+                    await self.connect()
+                    print(f"✅ Wiederverbindung erfolgreich! Setze Monitoring fort...\n")
+                    await asyncio.sleep(CHECK_INTERVAL)
+                    continue
                 
                 # Status Update
                 was_mining = self.is_mining

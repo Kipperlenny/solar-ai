@@ -64,8 +64,8 @@ WEATHER_LONGITUDE=-0.8481
 # Power thresholds (optional customization)
 MIN_POWER_TO_START=200
 MIN_POWER_TO_KEEP=150
-CHECK_INTERVAL=30
-ALARM_CHECK_INTERVAL=5
+CHECK_INTERVAL=120        # Check every 2 minutes (reduces Modbus conflicts)
+ALARM_CHECK_INTERVAL=30   # Check alarms every 30 seconds
 
 # GPU monitoring (optional disable)
 GPU_CHECK_ENABLED=True
