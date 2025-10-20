@@ -6,10 +6,11 @@ Automatic crypto mining with solar surplus. Starts mining only when enough solar
 
 - ⚡ **Solar-controlled Mining** - Starts/stops based on grid feed-in
 - 🎮 **GPU Monitoring** - Pauses automatically for games/Stable Diffusion
-- 🔄 **Auto-Restart** - Excavator restarts automatically on issues
+- 🔄 **Enhanced Auto-Restart** - Fast health monitoring (every 2 min) + immediate retry on failures
+- 🤖 **Auto-Update** - Automatically updates Excavator and huawei-solar package on startup
 - 💰 **Earnings Tracking** - Shows current BTC earnings
 - 🌦️ **Weather Integration** - Cloud cover, temperature, solar radiation (Open-Meteo API)
-- 📊 **Comprehensive Logging** - CSV data for analysis + error logs
+- 📊 **Comprehensive Logging** - CSV data for analysis + rotating error logs
 - 🌍 **Multilingual** - English/German CLI support (via LANGUAGE environment variable)
 
 ## Prerequisites
@@ -85,14 +86,30 @@ python solar_mining_api.py
 ```
 
 The script:
-1. Starts Excavator automatically
-2. Connects to inverter
-3. Monitors solar feed-in every 30s
-4. Starts mining at ≥200W feed-in (after 3x confirmation)
-5. Stops mining at <150W (after 5x confirmation)
-6. Pauses when GPU is used by other programs
+1. **Checks for updates** - Auto-updates Excavator and huawei-solar if available
+2. Starts Excavator automatically
+3. Connects to inverter (with unlimited retry on failures)
+4. Monitors solar feed-in every 2 minutes
+5. Starts mining at ≥200W feed-in (after 3x confirmation)
+   - On failure: immediate retry up to 3 times within 30s
+6. Stops mining at <150W (after 5x confirmation)
+7. Pauses when GPU is used by other programs
+8. Health checks every 2 minutes (detects frozen Excavator quickly)
 
 **Stop:** `Ctrl+C`
+
+## What's New in v2.0
+
+### 🚀 Enhanced Stability & Auto-Update
+
+- **Continuous Health Monitoring**: Excavator health checked every iteration (2 min) instead of every 6 min → 3x faster problem detection
+- **Immediate Mining Retries**: When mining start fails, retries up to 3 times within 30s (instead of waiting 2 minutes)
+- **Auto-Update Excavator**: Automatically checks GitHub for latest version and updates on startup
+- **Auto-Update huawei-solar**: Automatically updates Python package from PyPI on startup
+- **Rotating Logs**: Error logs now rotate at 5MB (keeps last 5 backups)
+- **Excavator Process Logs**: Captures stdout/stderr to `logs/excavator/` for better debugging
+
+See `ENHANCED_STABILITY_UPDATE.md` for detailed documentation.
 
 ## Output
 

@@ -1,0 +1,18 @@
+# Solar Mining Controller - Python Dependencies
+# Windows & Raspberry Pi compatible
+
+# Core functionality
+huawei-solar>=2.0.0      # Huawei inverter communication
+python-dotenv>=1.0.0     # Environment configuration
+requests>=2.31.0         # HTTP requests for APIs
+
+# Auto-update functionality
+packaging>=23.0          # Version comparison for updates
+
+# Windows-specific (optional on Raspberry Pi)
+GPUtil>=1.4.0           # GPU monitoring (NVIDIA only)
+psutil>=5.9.0           # Process monitoring
+
+# Optional: Data analysis tools
+# pandas>=2.0.0
+# matplotlib>=3.7.0

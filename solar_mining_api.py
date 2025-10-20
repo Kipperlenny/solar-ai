@@ -21,6 +21,8 @@ import asyncio
 import json
 import subprocess
 import os
+import sys
+import importlib
 import requests
 from huawei_solar import HuaweiSolarBridge
 from datetime import datetime
@@ -32,6 +34,12 @@ import traceback
 import csv
 from pathlib import Path
 from dotenv import load_dotenv
+import shutil
+import zipfile
+import tempfile
+from urllib.parse import urlparse
+import pkg_resources
+from packaging import version
 
 # Import shared components
 from solar_core import (
@@ -95,11 +103,20 @@ DATA_LOG_FILE = LOG_DIR / "solar_data.csv"
 # Setup Error Logger
 error_logger = logging.getLogger('error_logger')
 error_logger.setLevel(logging.DEBUG)
-error_handler = logging.FileHandler(ERROR_LOG_FILE, encoding='utf-8')
+from logging.handlers import RotatingFileHandler
+
+# Use rotating logs to avoid huge files
+error_handler = RotatingFileHandler(ERROR_LOG_FILE, encoding='utf-8', maxBytes=5*1024*1024, backupCount=5)
 error_handler.setLevel(logging.DEBUG)
 error_formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
 error_handler.setFormatter(error_formatter)
 error_logger.addHandler(error_handler)
+
+# Prepare excavator-specific logs
+EXCAVATOR_LOG_DIR = LOG_DIR / "excavator"
+EXCAVATOR_LOG_DIR.mkdir(exist_ok=True)
+EXCAVATOR_STDOUT = EXCAVATOR_LOG_DIR / "excavator_out.log"
+EXCAVATOR_STDERR = EXCAVATOR_LOG_DIR / "excavator_err.log"
 
 # Data Logger Setup
 def init_data_log():
@@ -171,6 +188,249 @@ def init_data_log():
 init_data_log()
 
 # WeatherAPI wird jetzt aus solar_core importiert (siehe oben)
+
+# ============================================================================
+# AUTO-UPDATE FUNCTIONS
+# ============================================================================
+
+def check_and_update_excavator(excavator_path):
+    """
+    Check for updates to NiceHash Excavator and auto-update if available.
+    
+    Returns:
+        bool: True if update was performed or not needed, False if error occurred
+    """
+    try:
+        print("\n🔍 Prüfe auf Excavator-Updates...")
+        error_logger.info("Checking for Excavator updates")
+        
+        # GitHub API für NiceHash Excavator Releases
+        api_url = "https://api.github.com/repos/nicehash/excavator/releases/latest"
+        
+        # Get latest release info
+        response = requests.get(api_url, timeout=10)
+        if response.status_code != 200:
+            print(f"   ⚠️  GitHub API nicht erreichbar (Status {response.status_code})")
+            error_logger.warning(f"GitHub API returned status {response.status_code}")
+            return True  # Not a critical error, continue
+        
+        release_data = response.json()
+        latest_version = release_data.get('tag_name', '').replace('v', '')
+        
+        if not latest_version:
+            print(f"   ⚠️  Keine Version gefunden")
+            return True
+        
+        # Get current version from excavator
+        current_version = None
+        try:
+            # Try to get version from running excavator or file
+            if os.path.exists(excavator_path):
+                # We can't easily determine version without running it
+                # For now, we'll check if there's a version file
+                version_file = Path(excavator_path).parent / "version.txt"
+                if version_file.exists():
+                    current_version = version_file.read_text().strip()
+                else:
+                    # No version file means we should update
+                    current_version = "0.0.0"
+            else:
+                current_version = "0.0.0"  # No excavator installed
+        except Exception as e:
+            error_logger.debug(f"Could not determine current version: {e}")
+            current_version = "0.0.0"
+        
+        print(f"   Installiert: {current_version}")
+        print(f"   Verfügbar:   {latest_version}")
+        
+        # Compare versions
+        try:
+            if version.parse(current_version) >= version.parse(latest_version):
+                print(f"   ✅ Excavator ist aktuell")
+                return True
+        except Exception as e:
+            error_logger.debug(f"Version comparison failed: {e}, will update")
+        
+        # Check if Excavator is running before attempting update
+        excavator_running = False
+        try:
+            for proc in psutil.process_iter(['name', 'exe']):
+                if proc.info['name'] and 'excavator' in proc.info['name'].lower():
+                    excavator_running = True
+                    break
+        except:
+            pass
+        
+        if excavator_running:
+            print(f"   ⚠️  Excavator läuft bereits - Update wird übersprungen")
+            print(f"   💡 TIPP: Beende Excavator und starte Script neu für Update")
+            error_logger.warning(f"Excavator update skipped - process is running (version {current_version} -> {latest_version} available)")
+            return True
+        
+        # Update needed
+        print(f"\n📥 Lade Excavator {latest_version} herunter...")
+        
+        # Find Windows download
+        download_url = None
+        for asset in release_data.get('assets', []):
+            if 'windows' in asset['name'].lower() or asset['name'].endswith('.zip'):
+                download_url = asset['browser_download_url']
+                break
+        
+        if not download_url:
+            print(f"   ❌ Keine Windows-Version gefunden")
+            error_logger.error("No Windows download found in release")
+            return True  # Continue anyway
+        
+        # Download to temp directory
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            zip_path = temp_dir_path / "excavator.zip"
+            
+            print(f"   Downloading from {download_url}...")
+            response = requests.get(download_url, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            with open(zip_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            print(f"   ✅ Download abgeschlossen")
+            
+            # Extract
+            print(f"   📦 Extrahiere Archiv...")
+            extract_dir = temp_dir_path / "extract"
+            extract_dir.mkdir()
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            
+            # Find excavator.exe in extracted files
+            new_excavator = None
+            for root, dirs, files in os.walk(extract_dir):
+                if 'excavator.exe' in files:
+                    new_excavator = Path(root) / 'excavator.exe'
+                    break
+            
+            if not new_excavator or not new_excavator.exists():
+                print(f"   ❌ excavator.exe nicht im Archiv gefunden")
+                error_logger.error("excavator.exe not found in downloaded archive")
+                return True
+            
+            # Backup old version
+            excavator_path_obj = Path(excavator_path)
+            if excavator_path_obj.exists():
+                backup_path = excavator_path_obj.parent / f"excavator_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.exe"
+                print(f"   💾 Sichere alte Version nach {backup_path.name}...")
+                shutil.copy2(excavator_path, backup_path)
+            
+            # Replace with new version
+            print(f"   📥 Installiere neue Version...")
+            shutil.copy2(new_excavator, excavator_path)
+            
+            # Save version file
+            version_file = excavator_path_obj.parent / "version.txt"
+            version_file.write_text(latest_version)
+            
+            print(f"   ✅ Excavator erfolgreich aktualisiert auf {latest_version}!")
+            error_logger.info(f"Excavator updated to version {latest_version}")
+            
+            return True
+            
+    except requests.exceptions.RequestException as e:
+        print(f"   ⚠️  Netzwerkfehler beim Update-Check: {e}")
+        error_logger.warning(f"Network error during update check: {e}")
+        return True  # Continue anyway
+    except Exception as e:
+        print(f"   ❌ Fehler beim Excavator-Update: {e}")
+        error_logger.error(f"Excavator update failed: {e}")
+        error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
+        return True  # Continue anyway, don't block startup
+
+
+def check_and_update_huawei_solar():
+    """
+    Check for updates to huawei-solar Python package and auto-update if available.
+    
+    Returns:
+        bool: True if update was performed or not needed, False if error occurred
+    """
+    try:
+        print("\n🔍 Prüfe auf huawei-solar Updates...")
+        error_logger.info("Checking for huawei-solar package updates")
+        
+        # Get currently installed version
+        try:
+            current_version = pkg_resources.get_distribution('huawei-solar').version
+            print(f"   Installiert: {current_version}")
+        except Exception as e:
+            print(f"   ⚠️  Konnte installierte Version nicht ermitteln: {e}")
+            current_version = "0.0.0"
+        
+        # Check latest version on PyPI
+        try:
+            response = requests.get('https://pypi.org/pypi/huawei-solar/json', timeout=10)
+            if response.status_code == 200:
+                pypi_data = response.json()
+                latest_version = pypi_data['info']['version']
+                print(f"   Verfügbar:   {latest_version}")
+            else:
+                print(f"   ⚠️  PyPI nicht erreichbar (Status {response.status_code})")
+                return True
+        except Exception as e:
+            print(f"   ⚠️  Konnte PyPI nicht abfragen: {e}")
+            error_logger.warning(f"PyPI query failed: {e}")
+            return True
+        
+        # Compare versions
+        try:
+            if version.parse(current_version) >= version.parse(latest_version):
+                print(f"   ✅ huawei-solar ist aktuell")
+                return True
+        except Exception as e:
+            error_logger.debug(f"Version comparison failed: {e}, will update")
+        
+        # Update needed
+        print(f"\n📥 Aktualisiere huawei-solar auf {latest_version}...")
+        
+        # Run pip upgrade using sys.executable (correct Python interpreter)
+        result = subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '--upgrade', 'huawei-solar'],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        
+        if result.returncode == 0:
+            print(f"   ✅ huawei-solar erfolgreich aktualisiert!")
+            error_logger.info(f"huawei-solar updated to version {latest_version}")
+            
+            # Verify new version (need to reload pkg_resources cache)
+            try:
+                import importlib
+                importlib.reload(pkg_resources)
+                new_version = pkg_resources.get_distribution('huawei-solar').version
+                print(f"   Neue Version: {new_version}")
+            except Exception as e:
+                print(f"   ⚠️  Konnte neue Version nicht überprüfen: {e}")
+            
+            return True
+        else:
+            print(f"   ❌ Update fehlgeschlagen:")
+            print(f"   {result.stderr}")
+            error_logger.error(f"huawei-solar update failed: {result.stderr}")
+            return True  # Continue anyway
+            
+    except subprocess.TimeoutExpired:
+        print(f"   ⚠️  pip install timeout")
+        error_logger.warning("pip install timeout during huawei-solar update")
+        return True
+    except Exception as e:
+        print(f"   ❌ Fehler beim huawei-solar Update: {e}")
+        error_logger.error(f"huawei-solar update failed: {e}")
+        error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
+        return True  # Continue anyway
+
 
 class NiceHashAPI:
     """NiceHash API für Earnings/Stats."""
@@ -417,6 +677,21 @@ class ExcavatorAPI:
         error_logger.debug(f"Method: {method}, Params: {params}, Retries: {retries}")
         error_logger.debug(f"Host: {self.host}, Port: {self.port}, Command ID: {self.cmd_id-1}")
         error_logger.debug(f"Last successful command: {self.last_successful_command}")
+
+        # If Excavator process is available, log PID/ memory/CPU for diagnostics
+        try:
+            if hasattr(self, 'controller') and self.controller and self.controller.excavator_process:
+                pid = self.controller.excavator_process.pid
+                error_logger.debug(f"Excavator PID: {pid}")
+                try:
+                    p = psutil.Process(pid)
+                    mem = p.memory_info().rss / (1024*1024)
+                    cpu = p.cpu_percent(interval=0.1)
+                    error_logger.debug(f"Excavator Memory: {mem:.1f} MB, CPU%: {cpu}")
+                except Exception as pe:
+                    error_logger.debug(f"Could not read excavator process stats: {pe}")
+        except Exception:
+            pass
         
         # Only print every 10th error to avoid spam
         if self.consecutive_errors == 1 or self.consecutive_errors % 10 == 0:
@@ -575,6 +850,11 @@ class SolarMiningController:
         self.mining_start_time = None
         self.gpu_paused = False  # Flag für GPU-Pause
         self.last_weather_data = {}  # Cache für Wetterdaten (immer verfügbar)
+        
+        # New: Mining failure tracking for immediate retry
+        self.mining_start_failures = 0
+        self.last_mining_attempt = None
+        self.mining_retry_delay = 30  # seconds between immediate retries
     
     def start_excavator(self):
         """Start Excavator if not already running."""
@@ -594,11 +874,29 @@ class SolarMiningController:
             print(f"🚀 {t('starting_excavator')}: {EXCAVATOR_PATH}")
             print(f"   {t('api_port')}: {EXCAVATOR_API_PORT}")
             
-            # Start Excavator in background
+            # Rotate excavator logs if they are too big
+            try:
+                MAX_EXCAVATOR_LOG = 5 * 1024 * 1024
+                for p in (EXCAVATOR_STDOUT, EXCAVATOR_STDERR):
+                    if p.exists() and p.stat().st_size > MAX_EXCAVATOR_LOG:
+                        # rotate: rename with timestamp
+                        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        p.rename(p.with_name(p.stem + f"_{ts}" + p.suffix))
+            except Exception as e:
+                error_logger.debug(f"Could not rotate excavator logs: {e}")
+
+            # Start Excavator in background and capture stdout/stderr to files
+            try:
+                stdout_f = open(EXCAVATOR_STDOUT, 'a', encoding='utf-8')
+                stderr_f = open(EXCAVATOR_STDERR, 'a', encoding='utf-8')
+            except Exception:
+                stdout_f = subprocess.PIPE
+                stderr_f = subprocess.PIPE
+
             self.excavator_process = subprocess.Popen(
                 [EXCAVATOR_PATH, "-p", str(EXCAVATOR_API_PORT)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=stdout_f,
+                stderr=stderr_f,
                 creationflags=subprocess.CREATE_NEW_CONSOLE  # Own window
             )
             
@@ -646,29 +944,36 @@ class SolarMiningController:
         
         if info:
             # All OK
+            if self.excavator.consecutive_errors > 0:
+                print(f"   ✅ Excavator API wieder erreichbar")
+                error_logger.info("Excavator API recovered")
             return True
         
         # API not responding - check if process still running
         if self.excavator_process and self.excavator_process.poll() is None:
             # Process still running but API not responding
-            if self.excavator.consecutive_errors >= 30:
+            if self.excavator.consecutive_errors >= 10:  # Reduced from 30 to 10
                 print(f"\n⚠️  {t('excavator_process_not_responding')}")
+                print(f"   API Timeouts: {self.excavator.consecutive_errors}x")
                 print(f"   {t('terminating_old_process')}")
-                error_logger.warning("Excavator process running but API not responding - restarting")
+                error_logger.warning(f"Excavator frozen - API not responding after {self.excavator.consecutive_errors} attempts")
                 error_logger.debug(f"PID: {self.excavator_process.pid}, Consecutive Errors: {self.excavator.consecutive_errors}")
                 try:
+                    print(f"   Beende Excavator (PID {self.excavator_process.pid})...")
                     self.excavator_process.terminate()
                     self.excavator_process.wait(timeout=5)
                 except Exception as e:
                     error_logger.error(f"Error terminating Excavator: {e}")
+                    print(f"   Force-Kill...")
                     self.excavator_process.kill()
                 
+                print(f"   Starte Excavator neu...")
                 self.excavator_process = None
                 self.excavator.consecutive_errors = 0
                 return self.start_excavator()
         else:
             # Process crashed
-            if self.excavator.consecutive_errors >= 10:
+            if self.excavator.consecutive_errors >= 5:  # Reduced from 10 to 5
                 print(f"\n⚠️  {t('excavator_crashed')}")
                 print(f"   {t('restarting_excavator')}")
                 error_logger.error("Excavator process crashed - restarting")
@@ -1064,9 +1369,9 @@ class SolarMiningController:
                 now = datetime.now().strftime("%H:%M:%S")
                 current_time = time.time()
                 
-                # Prüfe Excavator Health (alle 10 Iterationen)
-                if iteration % 10 == 0:
-                    self.check_excavator_health()
+                # Prüfe Excavator Health bei JEDER Iteration (alle 2 Minuten)
+                # Dies ermöglicht schnelleres Erkennen von Problemen
+                self.check_excavator_health()
                 
                 # Prüfe Inverter Alarme (häufiger als normale Checks!)
                 if current_time - last_alarm_check >= ALARM_CHECK_INTERVAL:
@@ -1303,7 +1608,9 @@ class SolarMiningController:
                 # ENTSCHEIDUNGSLOGIK (nur wenn nicht GPU-gepaused)
                 if not self.is_mining:
                     if available >= MIN_POWER_TO_START:
-                        self.start_confirmations += 1
+                        # Only increment if we haven't reached the threshold yet
+                        if self.start_confirmations < START_CONFIRMATIONS_NEEDED:
+                            self.start_confirmations += 1
                         self.stop_confirmations = 0
                         print(f"      ➕ Genug Power! {self.start_confirmations}/{START_CONFIRMATIONS_NEEDED}")
                         
@@ -1317,17 +1624,67 @@ class SolarMiningController:
                                 self.gpu_monitor.set_mining_active(True)  # GPU Monitor informieren
                                 self.start_confirmations = 0
                                 self.mining_start_time = datetime.now()
+                                self.mining_start_failures = 0  # Reset failure counter on success
+                                self.last_mining_attempt = time.time()
                             else:
-                                print("      ⚠️  Start fehlgeschlagen, versuche später erneut")
+                                # Mining start failed - implement immediate retry logic
+                                print("      ⚠️  Start fehlgeschlagen!")
+                                self.mining_start_failures += 1
+                                error_logger.warning(f"Mining start failed - attempt {self.mining_start_failures}")
+                                
+                                # Immediate retry if we still have power and haven't exceeded retry limit
+                                if self.mining_start_failures <= 3 and available >= MIN_POWER_TO_START:
+                                    # Calculate time since last attempt
+                                    time_since_last = time.time() - (self.last_mining_attempt or 0)
+                                    
+                                    # Wait a bit if last attempt was very recent
+                                    if time_since_last < self.mining_retry_delay:
+                                        wait_time = self.mining_retry_delay - time_since_last
+                                        print(f"      ⏳ Warte {wait_time:.0f}s vor erneutem Versuch...")
+                                        await asyncio.sleep(wait_time)
+                                    
+                                    # Verify power still available after wait
+                                    solar_retry, house_retry, available_retry = await self.get_available_solar_power()
+                                    
+                                    if available_retry >= MIN_POWER_TO_START:
+                                        print(f"      🔄 Sofortiger Retry {self.mining_start_failures}/3...")
+                                        self.last_mining_attempt = time.time()
+                                        success_retry = self.excavator.start_mining(
+                                            DEVICE_ID, ALGORITHM, STRATUM_URL, NICEHASH_WALLET
+                                        )
+                                        if success_retry:
+                                            print(f"      ✅ Retry erfolgreich!")
+                                            self.is_mining = True
+                                            self.gpu_monitor.set_mining_active(True)
+                                            self.start_confirmations = 0
+                                            self.mining_start_time = datetime.now()
+                                            self.mining_start_failures = 0
+                                            self.last_mining_attempt = time.time()
+                                        else:
+                                            print(f"      ❌ Retry {self.mining_start_failures}/3 fehlgeschlagen")
+                                            error_logger.error(f"Mining retry {self.mining_start_failures} failed")
+                                            if self.mining_start_failures >= 3:
+                                                print(f"      ⚠️  3 Versuche fehlgeschlagen - warte auf nächsten Zyklus")
+                                                error_logger.error("Mining retries exhausted - falling back to normal cycle")
+                                    else:
+                                        print(f"      ⚠️  Nicht genug Power mehr ({available_retry}W) - Retry abgebrochen")
+                                else:
+                                    if self.mining_start_failures > 3:
+                                        print(f"      ⚠️  3 Retries fehlgeschlagen - warte {CHECK_INTERVAL}s")
+                                    else:
+                                        print(f"      ⚠️  Nicht genug Power für Retry")
                     else:
                         self.start_confirmations = 0
+                        self.mining_start_failures = 0  # Reset failures when power insufficient
                         print(f"      ⏸️  Zu wenig Power (brauche {MIN_POWER_TO_START}W)")
                 
                 else:
                     # Mining läuft - prüfe ob genug Power (aber nur wenn nicht GPU-gepaused)
                     if not self.gpu_paused:
                         if available < MIN_POWER_TO_KEEP:
-                            self.stop_confirmations += 1
+                            # Only increment if we haven't reached the threshold yet
+                            if self.stop_confirmations < STOP_CONFIRMATIONS_NEEDED:
+                                self.stop_confirmations += 1
                             self.start_confirmations = 0
                             print(f"      ⚠️  Zu wenig Power! {self.stop_confirmations}/{STOP_CONFIRMATIONS_NEEDED}")
                             
@@ -1390,6 +1747,22 @@ class SolarMiningController:
 
 
 async def main():
+    # ============================================================================
+    # AUTO-UPDATE CHECKS
+    # ============================================================================
+    print("=" * 80)
+    print("🔄 AUTO-UPDATE CHECK")
+    print("=" * 80)
+    
+    # Check for huawei-solar package updates
+    check_and_update_huawei_solar()
+    
+    # Check for Excavator updates
+    check_and_update_excavator(EXCAVATOR_PATH)
+    
+    print("=" * 80)
+    print()
+    
     # Prüfe Konfiguration
     if "YOUR_WALLET_ADDRESS" in NICEHASH_WALLET:
         print("=" * 80)
