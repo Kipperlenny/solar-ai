@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 import requests
 
 try:
-    from huawei_solar import HuaweiSolarBridge
+    from huawei_solar import create_tcp_bridge
     HUAWEI_AVAILABLE = True
 except ImportError:
     HUAWEI_AVAILABLE = False
@@ -91,10 +91,10 @@ class InverterConnection:
             raise Exception("huawei-solar nicht installiert!")
         
         try:
-            self.bridge = await HuaweiSolarBridge.create(
+            # Note: huawei-solar API changed - now uses create_tcp_bridge()
+            self.bridge = await create_tcp_bridge(
                 host=self.host,
-                port=self.port,
-                slave_id=self.slave_id
+                port=self.port
             )
             return True
         except Exception as e:

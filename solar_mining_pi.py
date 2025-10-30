@@ -37,7 +37,7 @@ from solar_core import (
 from translations import t
 
 try:
-    from huawei_solar import HuaweiSolarBridge
+    from huawei_solar import create_tcp_bridge
     HUAWEI_AVAILABLE = True
 except ImportError:
     HUAWEI_AVAILABLE = False
@@ -279,10 +279,10 @@ class SolarMonitor:
             raise Exception("huawei-solar library not installed!")
         
         try:
-            self.bridge = await HuaweiSolarBridge.create(
+            # Note: huawei-solar API changed - now uses create_tcp_bridge()
+            self.bridge = await create_tcp_bridge(
                 host=INVERTER_HOST,
-                port=INVERTER_PORT,
-                slave_id=INVERTER_SLAVE_ID
+                port=INVERTER_PORT
             )
             print(f"✓ {t('inverter_connected')}")
             return True

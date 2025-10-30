@@ -139,6 +139,10 @@ TRANSLATIONS = {
         'excavator_start_timeout': 'Timeout waiting for Excavator API',
         'excavator_start_error': 'Error starting Excavator',
         
+        # QuickMiner API
+        'quickminer_detected': 'QuickMiner detected',
+        'using_quickminer_api': 'Using QuickMiner API with automatic profit switching',
+        
         # Status output format
         'status_line': '[{index}] {time}',
         'status_solar': '☀️  Solar:         {power:4.0f} W',
@@ -289,6 +293,10 @@ TRANSLATIONS = {
         'starting_excavator': 'Starte Excavator',
         'api_port': 'API Port',
         'priority_set': 'Priorität auf BELOW_NORMAL gesetzt (Gaming-freundlich)',
+        
+        # QuickMiner API
+        'quickminer_detected': 'QuickMiner erkannt',
+        'using_quickminer_api': 'Verwende QuickMiner API mit automatischem Profit-Switching',
         'waiting_for_api': 'Warte auf API...',
         'excavator_started': 'Excavator gestartet! Version: {version}',
         'excavator_start_timeout': 'Timeout beim Warten auf Excavator API',

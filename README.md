@@ -2,16 +2,60 @@
 
 Automatic crypto mining with solar surplus. Starts mining only when enough solar power is available and automatically pauses when GPU is used by other programs.
 
+## 🚀 Quick Start
+
+### Windows (Mining + Monitoring)
+
+**One-time setup:**
+```powershell
+.\setup_autostart.ps1
+```
+
+**Manual start:**
+```powershell
+start_solar_mining.bat
+```
+
+**Configure QuickMiner autostart:**
+- Open QuickMiner settings
+- Enable "Start with Windows"
+- Script will auto-detect it!
+
+### Raspberry Pi (Monitoring Only, No Mining)
+
+```bash
+chmod +x start_solar_mining_pi.sh
+./start_solar_mining_pi.sh
+```
+
+See `AUTOSTART_GUIDE.md` for systemd service setup.
+
+---
+
 ## Features
 
 - ⚡ **Solar-controlled Mining** - Starts/stops based on grid feed-in
 - 🎮 **GPU Monitoring** - Pauses automatically for games/Stable Diffusion
+- ⛏️ **Dual Miner Support** - Auto-detects QuickMiner (RTX 5000) or Excavator (legacy)
 - 🔄 **Enhanced Auto-Restart** - Fast health monitoring (every 2 min) + immediate retry on failures
 - 🤖 **Auto-Update** - Automatically updates Excavator and huawei-solar package on startup
 - 💰 **Earnings Tracking** - Shows current BTC earnings
 - 🌦️ **Weather Integration** - Cloud cover, temperature, solar radiation (Open-Meteo API)
 - 📊 **Comprehensive Logging** - CSV data for analysis + rotating error logs
 - 🌍 **Multilingual** - English/German CLI support (via LANGUAGE environment variable)
+
+## Miner Support
+
+### QuickMiner (Recommended)
+- ✅ RTX 5000 series support (RTX 5060 Ti, etc.)
+- ✅ Automatic profit switching (Autolykos2, KawPow, FishHash)
+- ✅ Modern algorithms
+- 📖 See `QUICKMINER_SETUP.md` for installation
+
+### Excavator (Legacy Fallback)
+- ⚠️ Limited to daggerhashimoto only
+- ⚠️ No RTX 5000 support
+- ✅ Auto-starts if QuickMiner not found
 
 ## Prerequisites
 
