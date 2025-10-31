@@ -102,6 +102,23 @@ STOP_CONFIRMATIONS_NEEDED = int(os.getenv("STOP_CONFIRMATIONS_NEEDED", "5"))
 GPU_USAGE_THRESHOLD = int(os.getenv("GPU_USAGE_THRESHOLD", "10"))
 GPU_CHECK_ENABLED = os.getenv("GPU_CHECK_ENABLED", "True").lower() == "true"
 
+# GPU power limit (safety feature to prevent crashes)
+# Set to percentage of maximum TDP (e.g., 85 = 85% of max power)
+# Lower values = safer but less performance. 100 = maximum power (not recommended).
+GPU_POWER_LIMIT_TDP = int(os.getenv("GPU_POWER_LIMIT_TDP", "85"))  # Default: 85% for stability
+
+# GPU thermal limits (automatic throttling for safety)
+GPU_TEMP_TARGET = int(os.getenv("GPU_TEMP_TARGET", "75"))  # Target core temp (°C)
+GPU_TEMP_THROTTLE = int(os.getenv("GPU_TEMP_THROTTLE", "80"))  # Start throttling at this temp
+GPU_TEMP_CRITICAL = int(os.getenv("GPU_TEMP_CRITICAL", "85"))  # Emergency shutdown temp
+GPU_VRAM_TEMP_TARGET = int(os.getenv("GPU_VRAM_TEMP_TARGET", "90"))  # Target VRAM temp (°C)
+GPU_VRAM_TEMP_THROTTLE = int(os.getenv("GPU_VRAM_TEMP_THROTTLE", "95"))  # VRAM throttle temp
+GPU_VRAM_TEMP_CRITICAL = int(os.getenv("GPU_VRAM_TEMP_CRITICAL", "100"))  # VRAM emergency temp
+GPU_THERMAL_CHECK_INTERVAL = int(os.getenv("GPU_THERMAL_CHECK_INTERVAL", "60"))  # Seconds between checks
+
+# QuickMiner startup wait (for autostart scenarios)
+QUICKMINER_STARTUP_WAIT = int(os.getenv("QUICKMINER_STARTUP_WAIT", "120"))  # Max seconds to wait for QuickMiner
+
 # Modbus timeout settings (for improved reliability)
 MODBUS_READ_TIMEOUT = int(os.getenv("MODBUS_READ_TIMEOUT", "10"))  # Timeout for non-critical reads
 MODBUS_CRITICAL_TIMEOUT = int(os.getenv("MODBUS_CRITICAL_TIMEOUT", "15"))  # Timeout for critical reads (solar power)
@@ -112,6 +129,7 @@ LOG_DIR.mkdir(exist_ok=True)
 ERROR_LOG_FILE = LOG_DIR / "errors.log"
 DATA_LOG_FILE = LOG_DIR / "solar_data.csv"
 GPU_HEALTH_LOG = LOG_DIR / "gpu_health.csv"
+GPU_THERMAL_LOG = LOG_DIR / "gpu_thermal.csv"
 
 # Setup Error Logger
 error_logger = logging.getLogger('error_logger')
@@ -177,6 +195,7 @@ def init_data_log():
                 'mining_active',
                 'mining_paused',
                 'hashrate_mhs',
+                'algorithm',
                 'excavator_errors',
                 'start_confirmations',
                 'stop_confirmations',
@@ -273,6 +292,72 @@ def log_gpu_health_event(timestamp, device_id, device_uuid, action, algorithm, r
             ])
     except Exception as e:
         error_logger.error(f"Failed to write gpu health log: {e}")
+
+def init_gpu_thermal_log():
+    """Initialize GPU thermal monitoring CSV for temperature tracking and analysis."""
+    if not GPU_THERMAL_LOG.exists():
+        with open(GPU_THERMAL_LOG, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'timestamp',
+                'unix_timestamp',
+                'device_id',
+                'device_name',
+                'gpu_core_temp_c',
+                'gpu_vram_temp_c',
+                'gpu_fan_speed_percent',
+                'gpu_fan_rpm',
+                'gpu_power_usage_w',
+                'gpu_power_limit_w',
+                'gpu_tdp_percent',
+                'gpu_load_percent',
+                'gpu_mem_load_percent',
+                'gpu_core_clock_mhz',
+                'gpu_mem_clock_mhz',
+                'too_hot_flag',
+                'thermal_action',  # 'normal', 'throttle_start', 'throttle_increase', 'critical_shutdown', 'throttle_release'
+                'tdp_before',
+                'tdp_after',
+                'notes'
+            ])
+
+init_gpu_thermal_log()
+
+def log_gpu_thermal_event(device_id, device_name, core_temp, vram_temp, fan_speed, fan_rpm,
+                          power_usage, power_limit, tdp_percent, gpu_load, mem_load,
+                          core_clock, mem_clock, too_hot, thermal_action='normal',
+                          tdp_before=None, tdp_after=None, notes=''):
+    """Log GPU thermal status to CSV for later analysis."""
+    try:
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        unix_ts = int(datetime.now().timestamp())
+        
+        with open(GPU_THERMAL_LOG, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                timestamp,
+                unix_ts,
+                device_id,
+                device_name or f"GPU {device_id}",
+                core_temp or 0,
+                vram_temp or 0,
+                fan_speed or 0,
+                fan_rpm or 0,
+                power_usage or 0,
+                power_limit or 0,
+                tdp_percent or 0,
+                gpu_load or 0,
+                mem_load or 0,
+                core_clock or 0,
+                mem_clock or 0,
+                1 if too_hot else 0,
+                thermal_action,
+                tdp_before or '',
+                tdp_after or '',
+                notes
+            ])
+    except Exception as e:
+        error_logger.error(f"Failed to write gpu thermal log: {e}")
 
 # WeatherAPI wird jetzt aus solar_core importiert (siehe oben)
 
@@ -972,49 +1057,53 @@ class QuickMinerAPI:
         
         return total_hashrate, gpu_hashrates
     
+    def get_current_algorithms(self):
+        """Returns dict of device_id -> algorithm name for all active workers."""
+        workers = self.get_workers()
+        algorithms = {}
+        
+        if workers:
+            for worker in workers:
+                device_id = worker.get("device_id", "?")
+                if "algorithms" in worker and worker["algorithms"]:
+                    algo_name = worker["algorithms"][0].get("name", "unknown")
+                    algorithms[device_id] = algo_name
+        
+        return algorithms
+    
     def start_mining(self, device_ids=None, algorithm=None, pool=None, wallet=None):
         """
-        Startet Mining via /quickstart endpoint.
+        Starts mining by enabling individual GPUs via /enable endpoint.
         
-        Parameters are ignored - QuickMiner manages devices, algorithms, and pools automatically.
-        They're accepted for API compatibility with ExcavatorAPI.
+        This is more reliable than /quickstart which has initialization issues.
+        device_ids: list of device IDs to enable (e.g., ['0', '1'])
+        algorithm: algorithm to use (defaults to 'kawpow' if not specified)
         """
         try:
-            headers = {"Authorization": self.auth_token} if self.auth_token else {}
+            # Default to all configured devices if none specified
+            if device_ids is None:
+                from solar_mining_api import DEVICE_IDS
+                device_ids = DEVICE_IDS
             
-            # Get wallet and worker from config
-            config_path = os.path.join(os.path.dirname(QUICKMINER_PATH), "nhqm.conf")
-            wallet_id = NICEHASH_WALLET  # From .env
+            # Default algorithm
+            if algorithm is None:
+                algorithm = "kawpow"  # QuickMiner's most profitable algo
             
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                    btc = config.get("authorization", {}).get("BTC")
-                    worker = config.get("authorization", {}).get("workerName", "worker1")
-                    if btc:
-                        wallet_id = f"{btc}.{worker}"
+            print(f"✓ Enabling {len(device_ids)} GPU(s) with {algorithm}...")
             
-            # The /quickstart endpoint requires: id (wallet.worker), loc (pool), ip (pool IP)
-            # QuickMiner auto-resolves pool location and IP, we use auto.nicehash.com
-            params = {
-                "id": wallet_id,
-                "loc": "nhmp.auto.nicehash.com",
-                "ip": "34.111.64.157"  # NiceHash pool IP (resolved by QuickMiner)
-            }
-            
-            url = f"{self.base_url}/quickstart"
-            response = requests.get(url, params=params, headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("error") is None:
-                    print("✓ Mining started successfully")
-                    return True
+            success_count = 0
+            for device_id in device_ids:
+                if self.enable_device(device_id, algo=algorithm):
+                    success_count += 1
+                    print(f"  ✓ GPU {device_id} enabled")
                 else:
-                    print(f"⚠ Mining start error: {data.get('error')}")
-                    return False
+                    print(f"  ✗ GPU {device_id} failed to enable")
+            
+            if success_count > 0:
+                print(f"✓ Mining started successfully on {success_count}/{len(device_ids)} GPU(s)")
+                return True
             else:
-                print(f"⚠ HTTP error {response.status_code}")
+                print("⚠ No GPUs could be enabled")
                 return False
                 
         except Exception as e:
@@ -1022,11 +1111,22 @@ class QuickMinerAPI:
             return False
     
     def stop_mining(self):
-        """Stoppt Mining via /quickstop endpoint."""
+        """Stops mining by disabling all active GPUs via /disable endpoint."""
         try:
-            headers = {"Authorization": self.auth_token} if self.auth_token else {}
-            response = requests.get(f"{self.base_url}/quickstop", headers=headers, timeout=5)
-            return response.status_code == 200 and response.json().get("error") is None
+            workers = self.get_workers()
+            if not workers:
+                return True  # Already stopped
+            
+            success_count = 0
+            for worker in workers:
+                device_id = worker.get("device_id")
+                if self.disable_device(device_id):
+                    success_count += 1
+                    print(f"  ✓ GPU {device_id} disabled")
+                else:
+                    print(f"  ✗ GPU {device_id} failed to disable")
+            
+            return success_count == len(workers)
         except Exception as e:
             error_logger.warning(f"QuickMiner stop error: {e}")
             return False
@@ -1113,7 +1213,8 @@ class QuickMinerAPI:
                 # Device ID might be string or int
                 device_id_str = str(device_id)
                 for device in devices:
-                    if str(device.get("id", "")) == device_id_str:
+                    # QuickMiner uses "device_id" field, not "id"
+                    if str(device.get("device_id", "")) == device_id_str:
                         return device.get("uuid")
             return None
         except Exception as e:
@@ -1131,6 +1232,257 @@ class QuickMinerAPI:
             return ""
         except:
             return ""
+    
+    def set_power_limit(self, device_id, tdp_percent=None, power_watts=None):
+        """
+        Set GPU power limit to reduce stress and prevent crashes.
+        
+        Args:
+            device_id: GPU device ID (0, 1, etc.)
+            tdp_percent: TDP percentage (e.g., 85 for 85% of max TDP)
+            power_watts: Absolute power limit in watts
+            
+        Returns:
+            bool: True if successful
+            
+        Example:
+            set_power_limit(0, tdp_percent=85)  # Limit GPU 0 to 85% TDP
+            set_power_limit(1, power_watts=150)  # Limit GPU 1 to 150W
+        """
+        try:
+            uuid = self._get_device_uuid(device_id)
+            if not uuid:
+                error_logger.warning(f"Could not find UUID for device {device_id}")
+                return False
+            
+            headers = {"Authorization": self.auth_token} if self.auth_token else {}
+            
+            # QuickMiner uses /action/setpowerlimit endpoint
+            # Format: /action/setpowerlimit?device=UUID&limit=VALUE
+            # where VALUE is TDP percentage (0-100)
+            
+            if tdp_percent is not None:
+                # Use TDP percentage
+                limit = max(50, min(100, tdp_percent))  # Clamp between 50-100%
+                params = {"device": uuid, "limit": limit}
+            elif power_watts is not None:
+                # Convert watts to TDP percentage
+                # Get device info to find default power limit
+                device_info = self._get_device_info(device_id)
+                if not device_info:
+                    return False
+                default_power = device_info.get("gpu_power_limit_default", 180)
+                tdp_percent = int((power_watts / default_power) * 100)
+                limit = max(50, min(100, tdp_percent))
+                params = {"device": uuid, "limit": limit}
+            else:
+                error_logger.warning("Must specify either tdp_percent or power_watts")
+                return False
+            
+            response = requests.get(
+                f"{self.base_url}/action/setpowerlimit",
+                params=params,
+                headers=headers,
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("error") is None:
+                    print(f"  ✓ GPU {device_id} power limit set to {limit}% TDP")
+                    return True
+                else:
+                    error_logger.warning(f"Power limit error: {result.get('error')}")
+            return False
+        except Exception as e:
+            error_logger.warning(f"QuickMiner set power limit error: {e}")
+            return False
+    
+    def _get_device_info(self, device_id):
+        """Get detailed info for a specific device."""
+        try:
+            headers = {"Authorization": self.auth_token} if self.auth_token else {}
+            response = requests.get(f"{self.base_url}/devices_cuda", headers=headers, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                devices = data.get("devices", [])
+                device_id_str = str(device_id)
+                for device in devices:
+                    if str(device.get("device_id", "")) == device_id_str:
+                        return device
+            return None
+        except Exception as e:
+            error_logger.warning(f"Failed to get device info: {e}")
+            return None
+    
+    def apply_safe_power_limits(self, tdp_percent=85):
+        """
+        Apply conservative power limits to all GPUs to prevent system crashes.
+        
+        Args:
+            tdp_percent: Target TDP percentage (default 85%)
+            
+        Call this at startup or before starting mining.
+        """
+        try:
+            print(f"\n🔋 Applying safe power limits ({tdp_percent}% TDP)...")
+            devices = self.get_devices()
+            success_count = 0
+            
+            for device in devices:
+                device_id = device.get("device_id")
+                if self.set_power_limit(device_id, tdp_percent=tdp_percent):
+                    success_count += 1
+            
+            if success_count > 0:
+                print(f"✓ Power limits applied to {success_count}/{len(devices)} GPU(s)\n")
+                return True
+            else:
+                print(f"⚠ Failed to apply power limits\n")
+                return False
+        except Exception as e:
+            error_logger.warning(f"Failed to apply safe power limits: {e}")
+            return False
+    
+    def get_gpu_thermal_status(self):
+        """
+        Get detailed thermal status for all GPUs.
+        
+        Returns:
+            list: List of dicts with thermal data per GPU
+        """
+        try:
+            devices = self.get_devices()
+            thermal_status = []
+            
+            for device in devices:
+                status = {
+                    'device_id': device.get('device_id'),
+                    'name': device.get('name', 'Unknown'),
+                    'core_temp': device.get('gpu_temp', 0),
+                    'vram_temp': device.get('__vram_temp', 0),  # VRAM temp (if available)
+                    'fan_speed': device.get('gpu_fan_speed', 0),
+                    'fan_rpm': device.get('gpu_fan_speed_rpm', -1),
+                    'power_usage': device.get('gpu_power_usage', 0),
+                    'power_limit': device.get('gpu_power_limit_current', 0),
+                    'tdp_percent': device.get('gpu_tdp_current', 100),
+                    'gpu_load': device.get('gpu_load', 0),
+                    'mem_load': device.get('gpu_load_memctrl', 0),
+                    'core_clock': device.get('gpu_clock_core', 0),
+                    'mem_clock': device.get('gpu_clock_memory', 0),
+                    'too_hot': device.get('too_hot', False),
+                }
+                thermal_status.append(status)
+            
+            return thermal_status
+        except Exception as e:
+            error_logger.warning(f"Failed to get thermal status: {e}")
+            return []
+    
+    def check_and_throttle_temperature(self, aggressive=False):
+        """
+        Check GPU temperatures and automatically throttle if needed.
+        
+        Args:
+            aggressive: If True, use more aggressive throttling (bigger TDP reductions)
+            
+        Returns:
+            dict: Actions taken per GPU {device_id: action_taken}
+        """
+        try:
+            thermal_status = self.get_gpu_thermal_status()
+            actions = {}
+            
+            for gpu in thermal_status:
+                device_id = gpu['device_id']
+                device_name = gpu['name']
+                core_temp = gpu['core_temp']
+                vram_temp = gpu['vram_temp']
+                current_tdp = gpu['tdp_percent']
+                too_hot = gpu['too_hot']
+                
+                action_taken = 'normal'
+                new_tdp = None
+                notes = ''
+                
+                # Critical temperature - emergency shutdown
+                if core_temp >= GPU_TEMP_CRITICAL or vram_temp >= GPU_VRAM_TEMP_CRITICAL:
+                    action_taken = 'critical_shutdown'
+                    new_tdp = 50  # Minimum TDP
+                    notes = f'CRITICAL: Core={core_temp}°C, VRAM={vram_temp}°C - Emergency throttle to 50%'
+                    print(f"\n🚨 CRITICAL TEMP on GPU {device_id}: Core={core_temp}°C, VRAM={vram_temp}°C")
+                    print(f"   Emergency throttling to 50% TDP!")
+                    error_logger.error(notes)
+                    
+                # High temperature - start throttling
+                elif core_temp >= GPU_TEMP_THROTTLE or vram_temp >= GPU_VRAM_TEMP_THROTTLE:
+                    # Calculate how much to reduce
+                    core_overheat = max(0, core_temp - GPU_TEMP_THROTTLE)
+                    vram_overheat = max(0, vram_temp - GPU_VRAM_TEMP_THROTTLE)
+                    max_overheat = max(core_overheat, vram_overheat)
+                    
+                    # Reduce TDP by 5% for every 2°C over threshold (or 10% if aggressive)
+                    reduction = int(max_overheat / 2) * (10 if aggressive else 5)
+                    new_tdp = max(50, current_tdp - reduction)
+                    
+                    if new_tdp < current_tdp:
+                        action_taken = 'throttle_increase' if reduction > 10 else 'throttle_start'
+                        notes = f'Throttling: Core={core_temp}°C, VRAM={vram_temp}°C - Reducing TDP by {reduction}%'
+                        print(f"\n🌡️  GPU {device_id} running hot: Core={core_temp}°C, VRAM={vram_temp}°C")
+                        print(f"   Throttling TDP: {current_tdp}% → {new_tdp}%")
+                        error_logger.warning(notes)
+                
+                # Temperature is good - can release throttle if we're below target
+                elif current_tdp < GPU_POWER_LIMIT_TDP and core_temp < GPU_TEMP_TARGET and vram_temp < GPU_VRAM_TEMP_TARGET:
+                    # Gradually increase TDP back up (5% at a time)
+                    new_tdp = min(GPU_POWER_LIMIT_TDP, current_tdp + 5)
+                    if new_tdp > current_tdp:
+                        action_taken = 'throttle_release'
+                        notes = f'Temps good: Core={core_temp}°C, VRAM={vram_temp}°C - Increasing TDP back to {new_tdp}%'
+                        print(f"\n✅ GPU {device_id} temps normal: Core={core_temp}°C, VRAM={vram_temp}°C")
+                        print(f"   Releasing throttle: {current_tdp}% → {new_tdp}%")
+                        error_logger.info(notes)
+                
+                # Apply TDP change if needed
+                if new_tdp is not None and new_tdp != current_tdp:
+                    success = self.set_power_limit(device_id, tdp_percent=new_tdp)
+                    if success:
+                        actions[device_id] = action_taken
+                    else:
+                        action_taken = 'failed'
+                        notes += ' - Failed to apply TDP change'
+                        error_logger.error(f"Failed to change TDP for GPU {device_id}")
+                else:
+                    actions[device_id] = 'normal'
+                
+                # Log thermal event
+                log_gpu_thermal_event(
+                    device_id=device_id,
+                    device_name=device_name,
+                    core_temp=core_temp,
+                    vram_temp=vram_temp,
+                    fan_speed=gpu['fan_speed'],
+                    fan_rpm=gpu['fan_rpm'],
+                    power_usage=gpu['power_usage'],
+                    power_limit=gpu['power_limit'],
+                    tdp_percent=new_tdp if new_tdp else current_tdp,
+                    gpu_load=gpu['gpu_load'],
+                    mem_load=gpu['mem_load'],
+                    core_clock=gpu['core_clock'],
+                    mem_clock=gpu['mem_clock'],
+                    too_hot=too_hot,
+                    thermal_action=action_taken,
+                    tdp_before=current_tdp if new_tdp else None,
+                    tdp_after=new_tdp,
+                    notes=notes
+                )
+            
+            return actions
+            
+        except Exception as e:
+            error_logger.error(f"Thermal throttling error: {e}")
+            error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
+            return {}
 
 
 class ExcavatorAPI:
@@ -1397,6 +1749,20 @@ class ExcavatorAPI:
                     total_hashrate += speed
         
         return total_hashrate, gpu_hashrates
+    
+    def get_current_algorithms(self):
+        """Returns dict of device_id -> algorithm name for all active workers."""
+        workers = self.get_workers()
+        algorithms = {}
+        
+        if workers:
+            for worker in workers:
+                device_id = worker.get("device_id", "?")
+                if "algorithms" in worker and worker["algorithms"]:
+                    algo_name = worker["algorithms"][0].get("name", "unknown")
+                    algorithms[device_id] = algo_name
+        
+        return algorithms
 
 
 def get_available_miner():
@@ -1528,6 +1894,145 @@ class SolarMiningController:
         # Auto-fix retry settings
         self.gpu_fix_retries = 3
         self.gpu_fix_retry_delay = 20  # seconds between retries
+        
+        # GPU thermal monitoring
+        self.last_thermal_check = 0  # Timestamp of last thermal check
+        self.thermal_throttle_active = {}  # {device_id: is_throttled}
+    
+    def wait_for_quickminer_ready(self, max_wait_time=None):
+        """
+        Wait for QuickMiner to fully start up and begin mining.
+        
+        This is critical for autostart scenarios where both QuickMiner and our script
+        start simultaneously. We need to wait for:
+        1. QuickMiner process to start
+        2. Excavator API to become available
+        3. GPUs to be detected
+        4. Mining to actually start (workers active)
+        
+        Args:
+            max_wait_time: Maximum seconds to wait (default: from config QUICKMINER_STARTUP_WAIT)
+            
+        Returns:
+            bool: True if QuickMiner is ready, False if timeout
+        """
+        if max_wait_time is None:
+            max_wait_time = QUICKMINER_STARTUP_WAIT
+        
+        if self.excavator.port != QUICKMINER_API_PORT:
+            # Not using QuickMiner, skip
+            return True
+        
+        print()
+        print("=" * 80)
+        print("⏳ WAITING FOR QUICKMINER TO START")
+        print("=" * 80)
+        print(f"QuickMiner needs time to:")
+        print(f"  1. Launch process")
+        print(f"  2. Initialize Excavator API")
+        print(f"  3. Detect GPUs")
+        print(f"  4. Build DAG files (can take 1-2 minutes)")
+        print(f"  5. Start mining workers")
+        print()
+        print(f"Maximum wait time: {max_wait_time} seconds")
+        print(f"Checking every 5 seconds...")
+        print("=" * 80)
+        print()
+        
+        start_time = time.time()
+        api_available = False
+        gpus_detected = False
+        mining_started = False
+        
+        while time.time() - start_time < max_wait_time:
+            elapsed = int(time.time() - start_time)
+            
+            # Step 1 & 2: Check if API is available
+            if not api_available:
+                info = self.excavator.get_info()
+                if info:
+                    api_available = True
+                    version = info.get('version', 'unknown')
+                    print(f"✅ [{elapsed}s] QuickMiner API available (Excavator {version})")
+                else:
+                    print(f"⏳ [{elapsed}s] Waiting for QuickMiner API...")
+                    time.sleep(5)
+                    continue
+            
+            # Step 3: Check if GPUs are detected
+            if not gpus_detected:
+                try:
+                    quickminer = QuickMinerAPI()
+                    devices = quickminer.get_devices()
+                    if devices and len(devices) > 0:
+                        gpus_detected = True
+                        gpu_names = [f"{d.get('device_id')}: {d.get('name', 'Unknown')}" for d in devices]
+                        print(f"✅ [{elapsed}s] GPUs detected: {', '.join(gpu_names)}")
+                    else:
+                        print(f"⏳ [{elapsed}s] Waiting for GPU detection...")
+                        time.sleep(5)
+                        continue
+                except Exception as e:
+                    print(f"⏳ [{elapsed}s] GPU detection not ready: {e}")
+                    time.sleep(5)
+                    continue
+            
+            # Step 4 & 5: Check if mining has started (workers active)
+            if not mining_started:
+                workers = self.excavator.get_workers()
+                if workers and len(workers) > 0:
+                    # Check if workers are actually mining (not just created)
+                    active_workers = []
+                    for worker in workers:
+                        device_id = worker.get('device_id', '?')
+                        algorithms = worker.get('algorithms', [])
+                        if algorithms:
+                            algo_name = algorithms[0].get('name', 'unknown')
+                            active_workers.append(f"GPU{device_id}:{algo_name}")
+                    
+                    if active_workers:
+                        mining_started = True
+                        print(f"✅ [{elapsed}s] Mining active: {', '.join(active_workers)}")
+                        print()
+                        print("=" * 80)
+                        print("✅ QUICKMINER FULLY STARTED AND MINING")
+                        print("=" * 80)
+                        print(f"Total startup time: {elapsed} seconds")
+                        print()
+                        return True
+                    else:
+                        print(f"⏳ [{elapsed}s] Workers exist but not mining yet (DAG building?)...")
+                        time.sleep(5)
+                        continue
+                else:
+                    print(f"⏳ [{elapsed}s] Waiting for mining to start...")
+                    time.sleep(5)
+                    continue
+        
+        # Timeout reached
+        print()
+        print("=" * 80)
+        print("⚠️  TIMEOUT WAITING FOR QUICKMINER")
+        print("=" * 80)
+        print(f"QuickMiner did not fully start after {max_wait_time} seconds")
+        print()
+        print("Possible issues:")
+        print("  • QuickMiner not set to auto-start mining")
+        print("  • DAG file building taking longer than expected")
+        print("  • GPU driver issues")
+        print("  • QuickMiner crashed during startup")
+        print()
+        print("What to do:")
+        print("  1. Check if QuickMiner is actually running")
+        print("  2. Open QuickMiner GUI and check for errors")
+        print("  3. Manually start mining in QuickMiner")
+        print("  4. Restart both QuickMiner and this script")
+        print()
+        print("Continuing anyway (script may not work correctly)...")
+        print("=" * 80)
+        print()
+        error_logger.warning(f"QuickMiner startup timeout after {max_wait_time}s")
+        return False
     
     def start_excavator(self):
         """Start miner if not already running (handles both QuickMiner and Excavator)."""
@@ -1755,10 +2260,27 @@ class SolarMiningController:
                 await asyncio.sleep(RETRY_DELAY)
                 # Continue loop
         
+        # Wait for QuickMiner to fully start (if using QuickMiner)
+        if self.excavator.port == QUICKMINER_API_PORT:
+            print(f"\n⏳ Checking QuickMiner startup status...")
+            if not self.wait_for_quickminer_ready():
+                print(f"⚠️  QuickMiner may not be fully ready, but continuing...")
+        
         # Start Excavator if needed
         print(f"\n🔌 {t('checking_excavator_api')} {self.excavator.host}:{self.excavator.port}...")
         if not self.start_excavator():
             raise Exception(t('excavator_could_not_start'))
+        
+        # Apply safe power limits to prevent system crashes
+        if self.excavator.port == QUICKMINER_API_PORT:
+            try:
+                quickminer = QuickMinerAPI()
+                # Apply configured TDP limit to all GPUs for stability
+                # This prevents PSU overload and thermal issues
+                quickminer.apply_safe_power_limits(tdp_percent=GPU_POWER_LIMIT_TDP)
+            except Exception as e:
+                error_logger.warning(f"Could not apply power limits: {e}")
+                print(f"⚠️  Warning: Could not set power limits - continuing anyway")
     
     async def get_available_solar_power(self):
         """Read available solar power with timeout protection."""
@@ -1768,17 +2290,20 @@ class SolarMiningController:
                 self.bridge.client.get("input_power"),
                 timeout=MODBUS_CRITICAL_TIMEOUT
             )
-            house_power = await asyncio.wait_for(
+            grid_power = await asyncio.wait_for(
                 self.bridge.client.get("power_meter_active_power"),
                 timeout=MODBUS_CRITICAL_TIMEOUT
             )
             
-            # Available power = feed-in (only what's left!)
-            # house_power > 0: Feed-in to grid (available for mining)
-            # house_power < 0: Grid import (nothing available, already drawing from grid)
-            available = max(0, house_power.value)  # Only positive feed-in counts
+            # Grid power interpretation (from inverter's perspective):
+            # positive value = feed-in to grid (we have surplus solar power)
+            # negative value = import from grid (house needs more than solar provides)
+            # 
+            # Available power for mining = what we're feeding to grid
+            # This is power we can redirect to mining without importing from grid
+            available = max(0, grid_power.value)
             
-            return solar_power.value, house_power.value, available
+            return solar_power.value, grid_power.value, available
         except asyncio.TimeoutError:
             error_logger.warning(f"Timeout reading solar data after {MODBUS_CRITICAL_TIMEOUT}s (Modbus slow/busy)")
             print(f"Timeout while waiting for connection (>{MODBUS_CRITICAL_TIMEOUT}s). Reconnecting...")
@@ -2116,7 +2641,8 @@ class SolarMiningController:
                     data = response.json()
                     devices = data.get("devices", [])
                     for device in devices:
-                        if str(device.get("id", "")) == str(device_id):
+                        # QuickMiner uses "device_id" field, not "id"
+                        if str(device.get("device_id", "")) == str(device_id):
                             return device.get("name", f"GPU {device_id}")
         except Exception as e:
             error_logger.debug(f"Could not get GPU name: {e}")
@@ -2331,6 +2857,36 @@ class SolarMiningController:
             error_logger.error(f"Error in GPU health check: {e}")
             error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
     
+    async def check_gpu_thermals(self):
+        """
+        Monitor GPU temperatures and automatically throttle if needed.
+        Only works with QuickMiner API.
+        """
+        if not self.is_mining:
+            return
+        
+        # Only check if using QuickMiner
+        if self.excavator.miner_type != "QuickMiner":
+            return
+        
+        try:
+            # Check thermal status and throttle if needed
+            quickminer = QuickMinerAPI()
+            actions = quickminer.check_and_throttle_temperature(aggressive=False)
+            
+            # Track which GPUs are throttled
+            for device_id, action in actions.items():
+                if action in ['throttle_start', 'throttle_increase', 'critical_shutdown']:
+                    self.thermal_throttle_active[str(device_id)] = True
+                elif action == 'throttle_release':
+                    self.thermal_throttle_active[str(device_id)] = False
+                elif action == 'normal' and str(device_id) not in self.thermal_throttle_active:
+                    self.thermal_throttle_active[str(device_id)] = False
+            
+        except Exception as e:
+            error_logger.error(f"Error in thermal monitoring: {e}")
+            error_logger.debug(f"Traceback:\n{traceback.format_exc()}")
+    
     async def scale_gpus(self, available_power):
         """
         Skaliert die Anzahl der mining GPUs basierend auf verfügbarer Power.
@@ -2410,46 +2966,48 @@ class SolarMiningController:
         print("=" * 80)
         print()
         
-        # Initial Status
+        # Initial Status - QuickMiner may have auto-started
         self.is_mining = self.excavator.is_mining()
         if self.is_mining:
-            print("ℹ️  Mining läuft bereits\n")
+            print("ℹ️  Mining läuft bereits (QuickMiner Auto-Start)")
+            print("   ℹ️  Solar-Script übernimmt Kontrolle via /enable und /disable API\n")
+            # Don't stop it - we can control individual GPUs without stopping
             self.mining_start_time = datetime.now()
             self.active_gpu_ids = self.get_active_workers_device_ids()
         else:
             print("ℹ️  Mining läuft nicht\n")
             
-            # Check if we have enough power to start mining immediately
-            try:
-                print("🔍 Prüfe verfügbare Solar-Power für Auto-Start...")
-                initial_solar, initial_house, initial_available = await self.get_available_solar_power()
-                print(f"   Solar: {initial_solar:.0f}W | Verfügbar: {initial_available:.0f}W")
+        # Check if we have enough power to start mining immediately
+        try:
+            print("🔍 Prüfe verfügbare Solar-Power für Auto-Start...")
+            initial_solar, initial_house, initial_available = await self.get_available_solar_power()
+            print(f"   Solar: {initial_solar:.0f}W | Verfügbar: {initial_available:.0f}W")
+            
+            target_gpu_count = self.calculate_target_gpu_count(initial_available)
+            if target_gpu_count > 0:
+                print(f"   ✅ Genug Power für {target_gpu_count} GPU(s)!")
+                print(f"\n   🚀 STARTE MINING SOFORT MIT {target_gpu_count} GPU(s)!\n")
                 
-                target_gpu_count = self.calculate_target_gpu_count(initial_available)
-                if target_gpu_count > 0:
-                    print(f"   ✅ Genug Power für {target_gpu_count} GPU(s)!")
-                    print(f"\n   🚀 STARTE MINING SOFORT MIT {target_gpu_count} GPU(s)!\n")
-                    
-                    gpus_to_start = DEVICE_IDS[:target_gpu_count]
-                    success = self.excavator.start_mining(
-                        gpus_to_start, ALGORITHM, STRATUM_URL, NICEHASH_WALLET
-                    )
-                    
-                    if success:
-                        self.is_mining = True
-                        self.gpu_monitor.set_mining_active(True)
-                        self.mining_start_time = datetime.now()
-                        self.active_gpu_ids = self.get_active_workers_device_ids()
-                        print(f"   ✅ Mining gestartet! GPUs: {', '.join(self.active_gpu_ids)}")
-                    else:
-                        print(f"   ⚠️  Mining-Start fehlgeschlagen - wird im Loop erneut versucht")
+                gpus_to_start = DEVICE_IDS[:target_gpu_count]
+                success = self.excavator.start_mining(
+                    gpus_to_start, ALGORITHM, STRATUM_URL, NICEHASH_WALLET
+                )
+                
+                if success:
+                    self.is_mining = True
+                    self.gpu_monitor.set_mining_active(True)
+                    self.mining_start_time = datetime.now()
+                    self.active_gpu_ids = self.get_active_workers_device_ids()
+                    print(f"   ✅ Mining gestartet! GPUs: {', '.join(self.active_gpu_ids)}")
                 else:
-                    print(f"   ⏸️  Nicht genug Power ({initial_available:.0f}W < {MIN_POWER_TO_START}W)")
-                    print(f"   → Mining startet automatisch wenn genug Solar-Power verfügbar ist")
-                print()
-            except Exception as e:
-                error_logger.warning(f"Auto-start check failed: {e}")
-                print(f"   ⚠️  Konnte Solar-Power nicht prüfen - normale Überwachung startet...\n")
+                    print(f"   ⚠️  Mining-Start fehlgeschlagen - wird im Loop erneut versucht")
+            else:
+                print(f"   ⏸️  Nicht genug Power ({initial_available:.0f}W < {MIN_POWER_TO_START}W)")
+                print(f"   → Mining startet automatisch wenn genug Solar-Power verfügbar ist")
+            print()
+        except Exception as e:
+            error_logger.warning(f"Auto-start check failed: {e}")
+            print(f"   ⚠️  Konnte Solar-Power nicht prüfen - normale Überwachung startet...\n")
         
         # Hole initiale Earnings
         print("💰 Hole NiceHash Earnings...")
@@ -2501,6 +3059,15 @@ class SolarMiningController:
                     except Exception as e:
                         error_logger.warning(f"Alarm check failed: {e}")
                         last_alarm_check = current_time  # Update timer to prevent spam
+                
+                # Prüfe GPU Temperaturen und throttle wenn nötig
+                if current_time - self.last_thermal_check >= GPU_THERMAL_CHECK_INTERVAL:
+                    try:
+                        await self.check_gpu_thermals()
+                        self.last_thermal_check = current_time
+                    except Exception as e:
+                        error_logger.warning(f"Thermal check failed: {e}")
+                        self.last_thermal_check = current_time
                 
                 # Lese Solar-Daten (mit Error Handling für Connection Loss)
                 try:
@@ -2646,6 +3213,13 @@ class SolarMiningController:
                 # Verwende immer die gecachten Wetterdaten (auch zwischen API-Calls!)
                 weather_data = self.last_weather_data
                 
+                # Get current algorithm(s) for logging
+                current_algos = self.excavator.get_current_algorithms()
+                algo_str = ""
+                if current_algos:
+                    unique_algos = set(current_algos.values())
+                    algo_str = ",".join(sorted(unique_algos))
+                
                 # DATA LOGGING - CSV für Auswertungen/ML
                 try:
                     with open(DATA_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
@@ -2665,6 +3239,7 @@ class SolarMiningController:
                             1 if self.is_mining else 0,
                             1 if self.gpu_paused else 0,
                             total_hashrate / 1e6 if total_hashrate > 0 else 0,
+                            algo_str,
                             self.excavator.consecutive_errors,
                             self.start_confirmations,
                             self.stop_confirmations,
@@ -2748,12 +3323,31 @@ class SolarMiningController:
                 else:
                     print(f"      ⛏️  {t('mining_status')}:      🔴 {t('mining_stopped')}")
                 
+                # Get current algorithms for display
+                current_algos = self.excavator.get_current_algorithms()
+                
                 if total_hashrate > 0:
-                    print(f"      📈 Total:       {total_hashrate/1e6:.2f} MH/s ✅")
+                    # Show algorithm info
+                    if current_algos:
+                        unique_algos = set(current_algos.values())
+                        if len(unique_algos) == 1:
+                            algo_name = list(unique_algos)[0]
+                            print(f"      📈 {algo_name.upper()}:   {total_hashrate/1e6:.2f} MH/s ✅")
+                        else:
+                            print(f"      📈 Total:       {total_hashrate/1e6:.2f} MH/s ✅")
+                    else:
+                        print(f"      📈 Total:       {total_hashrate/1e6:.2f} MH/s ✅")
+                    
                     # Show per-GPU hashrates if multiple GPUs
                     if len(gpu_hashrates) > 1:
-                        gpu_details = ", ".join([f"GPU{gpu_id}: {speed/1e6:.1f}" for gpu_id, speed in sorted(gpu_hashrates.items())])
-                        print(f"         └─ {gpu_details} MH/s")
+                        gpu_details = []
+                        for gpu_id, speed in sorted(gpu_hashrates.items()):
+                            algo = current_algos.get(gpu_id, "")
+                            if algo:
+                                gpu_details.append(f"GPU{gpu_id} ({algo}): {speed/1e6:.1f}")
+                            else:
+                                gpu_details.append(f"GPU{gpu_id}: {speed/1e6:.1f}")
+                        print(f"         └─ {', '.join(gpu_details)} MH/s")
                     elif len(gpu_hashrates) == 1:
                         gpu_id = list(gpu_hashrates.keys())[0]
                         print(f"         └─ GPU{gpu_id}")
