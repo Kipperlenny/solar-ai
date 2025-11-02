@@ -9,6 +9,9 @@ requests>=2.31.0         # HTTP requests for APIs
 # Auto-update functionality
 packaging>=23.0          # Version comparison for updates
 
+# Python 3.12+ compatibility
+setuptools>=65.0.0       # Required for GPUtil compatibility with Python 3.12+
+
 # Windows-specific (optional on Raspberry Pi)
 GPUtil>=1.4.0           # GPU monitoring (NVIDIA only)
 psutil>=5.9.0           # Process monitoring

@@ -79,8 +79,10 @@ ALGORITHM = os.getenv("ALGORITHM", "daggerhashimoto")
 STRATUM_URL = os.getenv("STRATUM_URL", "nhmp-ssl.eu.nicehash.com:443")
 NICEHASH_WALLET = os.getenv("NICEHASH_WALLET", "YOUR_WALLET_ADDRESS.worker_name")
 
-# NiceHash API (for earnings)
-NICEHASH_API_URL = "https://api2.nicehash.com/main/api/v2/mining/external"
+# NiceHash API (authenticated access for account stats)
+NICEHASH_API_KEY = os.getenv("NICEHASH_API_KEY", "")
+NICEHASH_API_SECRET = os.getenv("NICEHASH_API_CODE", "")  # In .env as API_CODE
+NICEHASH_ORGANIZATION_ID = os.getenv("NICEHASH_ORGANIZATION_ID", "")
 
 # Weather API (Open-Meteo - free, no API key needed)
 WEATHER_ENABLED = os.getenv("WEATHER_ENABLED", "True").lower() == "true"
@@ -750,46 +752,226 @@ def check_and_update_huawei_solar():
 
 
 class NiceHashAPI:
-    """NiceHash API für Earnings/Stats."""
+    """NiceHash API mit Authentifizierung für Account-Stats."""
     
-    def __init__(self, wallet_address):
+    def __init__(self, wallet_address, api_key=None, api_secret=None, org_id=None):
         self.wallet_address = wallet_address.split('.')[0]  # Nur Wallet ohne Worker-Name
-        self.api_url = NICEHASH_API_URL
+        self.api_key = api_key or NICEHASH_API_KEY
+        self.api_secret = api_secret or NICEHASH_API_SECRET
+        self.org_id = org_id or NICEHASH_ORGANIZATION_ID
+        self.base_url = "https://api2.nicehash.com"
         
-    def get_mining_address_stats(self):
-        """Holt Statistiken für Mining-Adresse."""
+        # Prüfe ob authentifiziert
+        self.authenticated = bool(self.api_key and self.api_secret and self.org_id)
+        
+    def _get_auth_header(self, method, path, query='', body=''):
+        """Erstellt NiceHash API Authentifizierungs-Header."""
+        import hmac
+        import hashlib
+        import uuid
+        from time import time
+        
+        xtime = str(int(time() * 1000))
+        xnonce = str(uuid.uuid4())
+        
+        message = bytearray(self.api_key, 'utf-8')
+        message += bytearray('\x00', 'utf-8')
+        message += bytearray(xtime, 'utf-8')
+        message += bytearray('\x00', 'utf-8')
+        message += bytearray(xnonce, 'utf-8')
+        message += bytearray('\x00', 'utf-8')
+        message += bytearray('\x00', 'utf-8')
+        message += bytearray(self.org_id, 'utf-8')
+        message += bytearray('\x00', 'utf-8')
+        message += bytearray('\x00', 'utf-8')
+        message += bytearray(method, 'utf-8')
+        message += bytearray('\x00', 'utf-8')
+        message += bytearray(path, 'utf-8')
+        message += bytearray('\x00', 'utf-8')
+        message += bytearray(query, 'utf-8')
+        
+        if body:
+            message += bytearray('\x00', 'utf-8')
+            message += bytearray(body, 'utf-8')
+        
+        digest = hmac.new(bytearray(self.api_secret, 'utf-8'), message, hashlib.sha256).hexdigest()
+        
+        return {
+            'X-Time': xtime,
+            'X-Nonce': xnonce,
+            'X-Organization-Id': self.org_id,
+            'X-Request-Id': str(uuid.uuid4()),
+            'X-Auth': f"{self.api_key}:{digest}"
+        }
+    
+    def _api_call(self, method, path, params=None):
+        """Macht authentifizierten API-Call."""
         try:
-            url = f"{self.api_url}/{self.wallet_address}"
-            response = requests.get(url, timeout=10)
+            query = '&'.join([f"{k}={v}" for k, v in (params or {}).items()])
+            headers = self._get_auth_header(method, path, query)
+            
+            url = f"{self.base_url}{path}"
+            if query:
+                url += f"?{query}"
+            
+            response = requests.request(method, url, headers=headers, timeout=10)
             
             if response.status_code == 200:
                 return response.json()
             else:
+                error_logger.warning(f"NiceHash API {path} returned {response.status_code}: {response.text[:200]}")
                 return None
         except Exception as e:
+            error_logger.warning(f"NiceHash API error on {path}: {e}")
             return None
+    
+    def get_accounts(self):
+        """Holt Account-Balances (BTC, fiat, etc.)."""
+        if not self.authenticated:
+            return None
+        return self._api_call('GET', '/main/api/v2/accounting/accounts2')
+    
+    def get_mining_rigs(self):
+        """Holt alle Mining Rigs."""
+        if not self.authenticated:
+            return None
+        return self._api_call('GET', '/main/api/v2/mining/rigs2')
+    
+    def get_mining_stats(self):
+        """Holt Mining-Statistiken."""
+        if not self.authenticated:
+            return None
+        return self._api_call('GET', '/main/api/v2/mining/algo/stats')
     
     def get_earnings_info(self):
         """Extrahiert wichtige Earnings-Informationen."""
-        stats = self.get_mining_address_stats()
-        
-        if not stats or 'unpaidAmount' not in stats:
+        if not self.authenticated:
             return None
         
+        # Hole Rig-Daten (enthält unpaid amounts)
+        rigs_data = self.get_mining_rigs()
+        if not rigs_data:
+            return None
+        
+        # Hole Account-Daten für verfügbares Guthaben
+        accounts = self.get_accounts()
+        available_btc = 0
+        total_balance_btc = 0
+        if accounts and 'total' in accounts:
+            total_data = accounts['total']
+            available_btc = float(total_data.get('available', 0))
+            total_balance_btc = float(total_data.get('totalBalance', 0))
+        
+        # Berechne aktuelle Profitabilität aus allen Rigs
+        current_profitability = float(rigs_data.get('totalProfitability', 0))
+        
+        # Wenn totalProfitability 0 ist (Rigs offline), summiere rig profitability
+        if current_profitability == 0:
+            for rig in rigs_data.get('miningRigs', []):
+                current_profitability += float(rig.get('profitability', 0))
+        
         return {
-            'unpaid_btc': float(stats.get('unpaidAmount', 0)),
-            'total_balance_btc': float(stats.get('totalBalance', 0)),
-            'total_paid_btc': float(stats.get('totalPaidAmount', 0)),
+            'unpaid_btc': float(rigs_data.get('unpaidAmount', 0)),
+            'available_btc': available_btc,
+            'total_balance_btc': total_balance_btc,
+            'current_profitability': current_profitability,  # BTC/day
         }
+    
+    def get_rig_stats(self, active_only=False, worker_name=None):
+        """
+        Holt detaillierte Rig-Statistiken.
+        
+        Args:
+            active_only: Nur aktive/MANAGED Rigs anzeigen
+            worker_name: Filter für spezifischen Worker-Namen
+        """
+        if not self.authenticated:
+            return None
+        
+        rigs_data = self.get_mining_rigs()
+        if not rigs_data or 'miningRigs' not in rigs_data:
+            return None
+        
+        rigs = []
+        for rig in rigs_data.get('miningRigs', []):
+            # Filter: Nur MANAGED rigs (von QuickMiner)
+            if active_only and rig.get('type') != 'MANAGED':
+                continue
+            
+            # Filter: Nur spezifischer Worker-Name
+            if worker_name and rig.get('name') != worker_name and rig.get('rigId') != worker_name:
+                continue
+            
+            rig_info = {
+                'name': rig.get('name', 'Unknown'),
+                'rig_id': rig.get('rigId', ''),
+                'type': rig.get('type', 'UNKNOWN'),
+                'status': rig.get('minerStatus', 'UNKNOWN'),
+                'profitability': float(rig.get('profitability', 0)),  # BTC/day
+                'local_profitability': float(rig.get('localProfitability', 0)),
+                'unpaid_amount': float(rig.get('unpaidAmount', 0)),
+                'devices': len(rig.get('devices', [])),
+                'algorithms': [],
+                'software': rig.get('softwareVersions', ''),
+            }
+            
+            # Sammle aktive Algorithmen-Info aus stats
+            for stat in rig.get('stats', []):
+                algo_info = stat.get('algorithm', {})
+                algo_name = algo_info.get('description', algo_info.get('enumName', 'Unknown'))
+                hashrate = float(stat.get('speedAccepted', 0))
+                unpaid = float(stat.get('unpaidAmount', 0))
+                profitability = float(stat.get('profitability', 0))
+                
+                if unpaid > 0 or hashrate > 0:  # Nur aktive/bezahlte Algos
+                    # Bestimme Einheit basierend auf Algorithmus
+                    if 'HASH' in algo_name.upper() or 'ETCHASH' in algo_name.upper():
+                        unit = 'MH/s'
+                        hashrate = hashrate / 1e6
+                    elif 'KAW' in algo_name.upper():
+                        unit = 'MH/s'
+                        hashrate = hashrate / 1e6
+                    else:
+                        unit = 'H/s'
+                    
+                    rig_info['algorithms'].append({
+                        'name': algo_name,
+                        'hashrate': hashrate,
+                        'unit': unit,
+                        'unpaid': unpaid,
+                        'profitability': profitability,
+                    })
+            
+            rigs.append(rig_info)
+        
+        return rigs
+    
+    def get_current_rig(self):
+        """Holt nur das aktuelle MANAGED Rig (von QuickMiner)."""
+        # Extrahiere Worker-Name aus NICEHASH_WALLET
+        worker_name = NICEHASH_WALLET.split('.')[-1] if '.' in NICEHASH_WALLET else None
+        rigs = self.get_rig_stats(active_only=True, worker_name=worker_name)
+        return rigs[0] if rigs else None
     
     def format_btc(self, btc_amount):
         """Formatiert BTC Betrag schön."""
         if btc_amount >= 0.01:
             return f"{btc_amount:.8f} BTC"
+        elif btc_amount >= 0.00001:
+            # mBTC (milliBTC)
+            return f"{btc_amount*1000:.5f} mBTC"
         else:
             # Zeige in Satoshis wenn sehr klein
             sats = btc_amount * 100_000_000
             return f"{sats:.0f} sats"
+    
+    def format_profitability(self, btc_per_day):
+        """Formatiert Profitabilität (BTC/Tag)."""
+        if btc_per_day >= 0.001:
+            return f"{btc_per_day:.8f} BTC/Tag"
+        else:
+            sats_per_day = btc_per_day * 100_000_000
+            return f"{sats_per_day:.0f} sats/Tag"
 
 
 class GPUMonitor:
@@ -1041,6 +1223,18 @@ class QuickMinerAPI:
         result = self._get_workers()
         return result.get("workers", [])
     
+    def get_devices(self):
+        """Get list of all GPU devices from QuickMiner."""
+        try:
+            headers = {"Authorization": self.auth_token} if self.auth_token else {}
+            response = requests.get(f"{self.base_url}/devices_cuda", headers=headers, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("devices", [])
+        except Exception as e:
+            error_logger.warning(f"QuickMiner get devices error: {e}")
+        return []
+    
     def get_hashrate(self):
         """Returns total hashrate and per-GPU breakdown."""
         workers = self.get_workers()
@@ -1088,6 +1282,11 @@ class QuickMinerAPI:
             # Default algorithm
             if algorithm is None:
                 algorithm = "kawpow"  # QuickMiner's most profitable algo
+            
+            # CRITICAL: Apply power limits BEFORE enabling devices
+            # This prevents PSU overload and ensures safe operation
+            print(f"🔋 Applying power limits ({GPU_POWER_LIMIT_TDP}% TDP) before mining...")
+            self.apply_safe_power_limits(tdp_percent=GPU_POWER_LIMIT_TDP)
             
             print(f"✓ Enabling {len(device_ids)} GPU(s) with {algorithm}...")
             
@@ -1257,30 +1456,28 @@ class QuickMinerAPI:
             
             headers = {"Authorization": self.auth_token} if self.auth_token else {}
             
-            # QuickMiner uses /action/setpowerlimit endpoint
-            # Format: /action/setpowerlimit?device=UUID&limit=VALUE
-            # where VALUE is TDP percentage (0-100)
+            # QuickMiner uses /setpowerlimit endpoint
+            # Format: /setpowerlimit?id=UUID&plw=WATTS
+            # where plw is absolute power limit in watts
             
             if tdp_percent is not None:
-                # Use TDP percentage
-                limit = max(50, min(100, tdp_percent))  # Clamp between 50-100%
-                params = {"device": uuid, "limit": limit}
-            elif power_watts is not None:
-                # Convert watts to TDP percentage
-                # Get device info to find default power limit
+                # Convert TDP percentage to watts
                 device_info = self._get_device_info(device_id)
                 if not device_info:
+                    error_logger.warning(f"Could not get device info for {device_id}")
                     return False
                 default_power = device_info.get("gpu_power_limit_default", 180)
-                tdp_percent = int((power_watts / default_power) * 100)
-                limit = max(50, min(100, tdp_percent))
-                params = {"device": uuid, "limit": limit}
+                power_watts = int((tdp_percent / 100) * default_power)
+                params = {"id": uuid, "plw": power_watts}
+            elif power_watts is not None:
+                # Use absolute watts
+                params = {"id": uuid, "plw": int(power_watts)}
             else:
                 error_logger.warning("Must specify either tdp_percent or power_watts")
                 return False
             
             response = requests.get(
-                f"{self.base_url}/action/setpowerlimit",
+                f"{self.base_url}/setpowerlimit",
                 params=params,
                 headers=headers,
                 timeout=5
@@ -1289,10 +1486,21 @@ class QuickMinerAPI:
             if response.status_code == 200:
                 result = response.json()
                 if result.get("error") is None:
-                    print(f"  ✓ GPU {device_id} power limit set to {limit}% TDP")
+                    # Calculate effective TDP for display
+                    device_info = self._get_device_info(device_id)
+                    if device_info:
+                        default_power = device_info.get("gpu_power_limit_default", 180)
+                        effective_tdp = int((params["plw"] / default_power) * 100)
+                        print(f"  ✓ GPU {device_id} power limit set to {params['plw']}W ({effective_tdp}% TDP)")
+                    else:
+                        print(f"  ✓ GPU {device_id} power limit set to {params['plw']}W")
                     return True
                 else:
-                    error_logger.warning(f"Power limit error: {result.get('error')}")
+                    error_logger.warning(f"Power limit error for GPU {device_id}: {result.get('error')}")
+                    print(f"  ✗ GPU {device_id} power limit failed: {result.get('error')}")
+            else:
+                error_logger.warning(f"Power limit HTTP error for GPU {device_id}: {response.status_code}")
+                print(f"  ✗ GPU {device_id} HTTP error: {response.status_code}")
             return False
         except Exception as e:
             error_logger.warning(f"QuickMiner set power limit error: {e}")
@@ -2274,10 +2482,13 @@ class SolarMiningController:
         # Apply safe power limits to prevent system crashes
         if self.excavator.port == QUICKMINER_API_PORT:
             try:
-                quickminer = QuickMinerAPI()
-                # Apply configured TDP limit to all GPUs for stability
-                # This prevents PSU overload and thermal issues
-                quickminer.apply_safe_power_limits(tdp_percent=GPU_POWER_LIMIT_TDP)
+                # Use the existing QuickMinerAPI instance
+                if isinstance(self.excavator, QuickMinerAPI):
+                    # Apply configured TDP limit to all GPUs for stability
+                    # This prevents PSU overload and thermal issues
+                    self.excavator.apply_safe_power_limits(tdp_percent=GPU_POWER_LIMIT_TDP)
+                else:
+                    print(f"⚠️  Power limits only available with QuickMiner")
             except Exception as e:
                 error_logger.warning(f"Could not apply power limits: {e}")
                 print(f"⚠️  Warning: Could not set power limits - continuing anyway")
@@ -2970,10 +3181,21 @@ class SolarMiningController:
         self.is_mining = self.excavator.is_mining()
         if self.is_mining:
             print("ℹ️  Mining läuft bereits (QuickMiner Auto-Start)")
-            print("   ℹ️  Solar-Script übernimmt Kontrolle via /enable und /disable API\n")
-            # Don't stop it - we can control individual GPUs without stopping
+            print("   ℹ️  Solar-Script übernimmt Kontrolle via /enable und /disable API")
+            
+            # CRITICAL: Apply power limits immediately if QuickMiner auto-started
+            # QuickMiner starts at 100% TDP by default which can overload PSU
+            if isinstance(self.excavator, QuickMinerAPI):
+                print(f"   🔋 Applying safety power limits ({GPU_POWER_LIMIT_TDP}% TDP)...")
+                try:
+                    self.excavator.apply_safe_power_limits(tdp_percent=GPU_POWER_LIMIT_TDP)
+                except Exception as e:
+                    error_logger.warning(f"Could not apply power limits to running miner: {e}")
+                    print(f"   ⚠️  Warning: Could not set power limits")
+            
             self.mining_start_time = datetime.now()
             self.active_gpu_ids = self.get_active_workers_device_ids()
+            print()
         else:
             print("ℹ️  Mining läuft nicht\n")
             
@@ -3009,14 +3231,52 @@ class SolarMiningController:
             error_logger.warning(f"Auto-start check failed: {e}")
             print(f"   ⚠️  Konnte Solar-Power nicht prüfen - normale Überwachung startet...\n")
         
-        # Hole initiale Earnings
-        print("💰 Hole NiceHash Earnings...")
-        earnings = self.nicehash.get_earnings_info()
-        if earnings:
-            print(f"   Unbezahlt: {self.nicehash.format_btc(earnings['unpaid_btc'])}")
-            print(f"   Gesamt bezahlt: {self.nicehash.format_btc(earnings['total_paid_btc'])}")
+        # Hole NiceHash Account Stats (mit Authentifizierung)
+        print("💰 Hole NiceHash Account Stats...")
+        if self.nicehash.authenticated:
+            earnings = self.nicehash.get_earnings_info()
+            if earnings:
+                print(f"   📊 BTC BALANCE:")
+                print(f"      Unbezahlt:   {self.nicehash.format_btc(earnings['unpaid_btc'])}")
+                print(f"      Verfügbar:   {self.nicehash.format_btc(earnings['available_btc'])}")
+                print(f"      Total:       {self.nicehash.format_btc(earnings['total_balance_btc'])}")
+                if earnings['current_profitability'] > 0:
+                    print(f"      Profit/Tag:  {self.nicehash.format_profitability(earnings['current_profitability'])}")
+                
+                # Zeige nur das aktuelle MANAGED Rig (von QuickMiner)
+                current_rig = self.nicehash.get_current_rig()
+                if current_rig:
+                    status_icon = "✅" if current_rig['status'] == "MINING" else "⏸️" if current_rig['status'] == "DISABLED" else "💤"
+                    print(f"\n   🖥️  CURRENT RIG:")
+                    print(f"      {status_icon} {current_rig['name']} ({current_rig['type']})")
+                    print(f"      Status: {current_rig['status']}", end="")
+                    
+                    # Hinweis wenn gerade gestartet wurde
+                    if current_rig['status'] == 'OFFLINE' and self.is_mining:
+                        print(" (NiceHash braucht 1-2 Min. zum Update)")
+                    else:
+                        print()
+                    
+                    if current_rig['unpaid_amount'] > 0:
+                        print(f"      Unbezahlt: {self.nicehash.format_btc(current_rig['unpaid_amount'])}")
+                    if current_rig['profitability'] > 0:
+                        print(f"      Profit: {self.nicehash.format_profitability(current_rig['profitability'])}")
+                    if current_rig['software']:
+                        print(f"      Software: {current_rig['software']}")
+                    if current_rig['algorithms']:
+                        print(f"      Algorithmen:")
+                        for algo in current_rig['algorithms']:
+                            if algo['hashrate'] > 0:
+                                print(f"         • {algo['name']}: {algo['hashrate']:.2f} {algo['unit']}")
+                else:
+                    print(f"\n   ℹ️  Kein aktives MANAGED Rig gefunden")
+                    print(f"   💡 Rig erscheint automatisch wenn Mining startet")
+            else:
+                print("   ⚠️  Konnte Account-Daten nicht abrufen")
+                print("   💡 API-Key korrekt in .env konfiguriert?")
         else:
-            print("   ⚠️  Earnings noch nicht verfügbar (Mining gerade gestartet?)")
+            print("   ℹ️  Earnings über QuickMiner GUI oder NiceHash Website einsehbar")
+            print("   💡 Für API-Zugriff: NICEHASH_API_KEY, NICEHASH_API_CODE, NICEHASH_ORGANIZATION_ID in .env setzen")
         print()
         
         # Hole initiale Wetterdaten (Cache füllen für CSV!)
@@ -3363,17 +3623,29 @@ class SolarMiningController:
                     secs = int(session_time % 60)
                     print(f"      ⏱️  Session:     {mins}m {secs}s")
                 
-                # Earnings alle 10 Minuten updaten
-                if iteration % 20 == 0 or (iteration == 1 and earnings is None):
+                # Earnings alle 10 Minuten updaten (wenn API verfügbar)
+                if self.nicehash.authenticated and (iteration % 20 == 0 or (iteration == 1 and earnings is None)):
                     earnings = self.nicehash.get_earnings_info()
-                    if earnings:
-                        print(f"      💰 Unbezahlt:   {self.nicehash.format_btc(earnings['unpaid_btc'])}")
+                
+                # Zeige detaillierte Earnings-Info (wenn verfügbar)
+                if earnings and self.nicehash.authenticated:
+                    print(f"      💰 Balance:     {self.nicehash.format_btc(earnings['unpaid_btc'])} unbezahlt")
+                    if earnings.get('current_profitability', 0) > 0:
+                        print(f"      � Profit/Tag:  {self.nicehash.format_profitability(earnings['current_profitability'])}")
                 
                 # Wetter-Daten anzeigen (alle 10 Minuten)
                 if weather_data:
                     print(f"      🌡️  Wetter:      {weather_data.get('temperature_c', 0):.1f}°C, " +
                           f"☁️ {weather_data.get('cloud_cover_percent', 0):.0f}%, " +
                           f"☀️ {weather_data.get('global_radiation_wm2', 0):.0f} W/m²")
+                
+                # Rig Status alle 10 Minuten anzeigen (wenn mining aktiv)
+                if self.nicehash.authenticated and iteration % 20 == 0 and self.is_mining:
+                    current_rig = self.nicehash.get_current_rig()
+                    if current_rig:
+                        rig_status = current_rig['status']
+                        status_icon = "✅" if rig_status == "MINING" else "⏸️" if rig_status == "DISABLED" else "💤"
+                        print(f"      🖥️  Rig Status:  {status_icon} {rig_status}")
                 
                 # GPU MONITORING - Prüfe ob andere Software die GPU braucht
                 gpu_busy = False
@@ -3512,10 +3784,14 @@ class SolarMiningController:
                 mins = int((self.total_mining_time % 3600) / 60)
                 print(f"\n📊 Gesamt gemined: {hours}h {mins}m")
                 
-                # Finale Earnings
-                earnings = self.nicehash.get_earnings_info()
-                if earnings:
-                    print(f"💰 Unbezahlt: {self.nicehash.format_btc(earnings['unpaid_btc'])}")
+                # Finale Earnings (mit Details wenn API verfügbar)
+                if self.nicehash.authenticated:
+                    earnings = self.nicehash.get_earnings_info()
+                    if earnings:
+                        print(f"\n💰 FINALE EARNINGS:")
+                        print(f"   Unbezahlt:   {self.nicehash.format_btc(earnings['unpaid_btc'])}")
+                        print(f"   Verfügbar:   {self.nicehash.format_btc(earnings['available_btc'])}")
+                        print(f"   Total:       {self.nicehash.format_btc(earnings['total_balance_btc'])}")
             
             if self.is_mining:
                 choice = input("\nMining stoppen? (j/n): ").strip().lower()
