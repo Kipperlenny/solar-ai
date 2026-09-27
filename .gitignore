@@ -1,12 +1,8 @@
-# Logs
+# Local data and secrets
+.env
 logs/
 *.log
-
-# Mining
-dagcache/
-
-# Environment variables
-.env
+archive/
 
 # Python
 __pycache__/
@@ -14,9 +10,6 @@ __pycache__/
 *$py.class
 .venv/
 venv/
-
-# NiceHash Config
-nhqm.conf
 
 # IDE
 .vscode/

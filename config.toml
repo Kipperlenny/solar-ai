@@ -1,0 +1,82 @@
+# Solar AI configuration.
+# Hosts, script ids and passwords are device-specific and live in .env.
+# After changing [pool] or [boiler], redeploy the Shelly script:
+#   python tools/shelly_deploy.py pool
+#   python tools/shelly_deploy.py boiler
+# After changing anything else, restart solar_hub.py.
+
+[hub]
+interval_sec = 60          # how often the SDongle is read and data is pushed
+sdongle_unit = 100         # Modbus unit id of the SDongle itself
+
+# Electricity tariff. Defaults: Spanish 2.0TD.
+[tariff]
+# Periods on working days, as [from, to, period]. Weekends and holidays use weekend_period.
+weekday_periods = [
+  ["00:00", "08:00", "P3"],
+  ["08:00", "10:00", "P2"],
+  ["10:00", "14:00", "P1"],
+  ["14:00", "18:00", "P2"],
+  ["18:00", "22:00", "P1"],
+  ["22:00", "24:00", "P2"],
+]
+weekend_period = "P3"
+# Fixed-date national holidays ("MM-DD"); regional and movable holidays don't count for 2.0TD.
+holidays = ["01-01", "01-06", "05-01", "08-15", "10-12", "11-01", "12-06", "12-08", "12-25"]
+# Only used for logging. Cheapest period = "cheap", most expensive = "expensive" for the bulb.
+prices_eur_kwh = { P1 = 0.231734, P2 = 0.138888, P3 = 0.093991 }
+
+# Pool pump behind a solar collector: only run in strong sun.
+# Keys are passed as-is to shelly/pool_pump_solar.js.
+[pool]
+onW = 2500                 # start cycling at or above this PV power
+offW = 2000                # stop cycling below this PV power
+onMin = 1                  # pump on minutes per cycle
+offMin = 3                 # pump off minutes per cycle
+maxPvAgeSec = 300          # switch off if the hub sends no PV value for this long
+
+# Electric hot water boiler.
+# Keys are passed as-is to shelly/boiler_solar.js.
+[boiler]
+nightStart = "23:00"       # off from here...
+nightEnd = "09:00"         # ...until here
+forceStart = "16:00"       # always on from here until nightStart (tank full before evening showers)
+fallbackStart = "12:00"    # without hub data: on from here instead of the surplus logic
+tryPvW = 2000              # try heating from surplus at or above this PV power
+maxImportW = 300           # grid import tolerated while heating from surplus
+badReadings = 2            # consecutive readings above maxImportW before giving up
+settleSec = 120            # time for other loads (e.g. a surplus-charging wallbox) to regulate down
+retrySec = 900             # wait after a failed surplus try
+fullBelowW = 30            # switched on but drawing less = thermostat satisfied, tank is full
+fullAfterSec = 120
+maxNotFullSec = 86400      # legionella: heat outside the night if not full for this long
+maxDataAgeSec = 600
+
+# Shelly Color Bulb as a power indicator.
+[bulb]
+interval_sec = 5           # how often the bulb is checked (it may have just been switched on)
+dark_below_pv_w = 400      # "dark outside": the light is needed, use bright white
+bright_above_pv_w = 600
+surplus_on_export_w = 2000   # real surplus, enough to start e.g. a dryer
+surplus_off_export_w = 1200
+consumed_above_pv_w = 2000   # PV is there, but a load (e.g. surplus-charging wallbox) takes it
+consumed_below_export_w = 300
+
+# Daytime colors as [red, green, blue, gain %].
+[bulb.day_colors]
+surplus = [0, 255, 0, 8]               # very dark green: switch on big loads now
+cheap = [0, 255, 0, 100]               # bright green: cheapest tariff
+mid = [255, 180, 0, 100]               # bright yellow/orange: middle tariff
+expensive_consumed = [255, 80, 0, 100]  # orange: expensive, PV taken by a load
+expensive = [255, 0, 0, 15]            # dark red: expensive, no PV
+unknown = [255, 255, 255, 30]          # no data
+
+# In the dark: white mode as [color temperature K (3000-6500), brightness %].
+# The bulb can't mix its white LEDs with color, so the state is the color temperature.
+[bulb.dark_whites]
+surplus = [6500, 100]
+cheap = [6500, 100]
+mid = [4500, 100]
+expensive_consumed = [3000, 100]
+expensive = [3000, 100]
+unknown = [4500, 100]

@@ -1,379 +1,149 @@
-# Solar Mining Controller
+# Solar AI
 
-Automatic crypto mining with solar surplus. Starts mining only when enough solar power is available and automatically pauses when GPU is used by other programs.
+Use your own PV production to run household loads at the right time – with
+a Huawei inverter, a few Shelly devices and a small Python hub.
 
-## 🚀 Quick Start
+- **Pool pump** behind a solar collector: runs only in strong sun.
+- **Electric hot water boiler**: heats from surplus during the day, is
+  always hot in the evening, off at night, with a legionella safeguard.
+- **Color bulb** as a traffic light: shows whether there is surplus or how
+  expensive grid power is right now.
 
-### Windows (Mining + Monitoring)
+Works alongside a wallbox that charges from surplus (e.g. Huawei FusionSolar
+"surplus charging") without reading or controlling it.
 
-**One-time setup:**
-```powershell
-.\setup_autostart.ps1
+## How it works
+
+```
+Huawei SDongle ──Modbus read──> solar_hub.py ──HTTP──> Shelly plug + script  (pool pump)
+                                 every 60 s     ├──> Shelly plug + script  (boiler)
+                                                └──> Shelly Color Bulb     (indicator)
 ```
 
-**Manual start:**
-```powershell
-start_solar_mining.bat
-```
+[solar_hub.py](solar_hub.py) reads the total PV input power and the house
+load from the SDongle (unit 100, registers 37498/37500) and pushes them to
+the scripts running on the Shelly plugs. **The plugs decide themselves** and
+fall back to safe behaviour when the hub is not running – so the hub can run
+on a PC that is not on 24/7. Every minute a row goes to `logs/hub.csv`.
 
-**Configure QuickMiner autostart:**
-- Open QuickMiner settings
-- Enable "Start with Windows"
-- Script will auto-detect it!
+The inverter is only **read** (Modbus function code 03). Nothing is ever
+written to it.
 
-### Raspberry Pi (Monitoring Only, No Mining)
+## Hardware
 
-```bash
-chmod +x start_solar_mining_pi.sh
-./start_solar_mining_pi.sh
-```
+| Device | Used for | Tested with |
+|---|---|---|
+| Huawei SUN2000 inverter + SDongle | PV power and house load | SUN2000-6KTL-L1, SDongle with Modbus TCP enabled |
+| Shelly Gen2+/Gen3 plug with scripting | pool pump, boiler | Shelly Outdoor Plug S Gen3 (16 A) |
+| Shelly Color Bulb (Gen1) | indicator | SHCB-1, firmware 1.14.0 |
 
-See `AUTOSTART_GUIDE.md` for systemd service setup.
+Each device is optional: leave its host empty in `.env` and it is skipped.
 
----
+## Setup
 
-## Features
+1. Give every device a fixed IP in your router.
+2. Install:
 
-- ⚡ **Solar-controlled Mining** - Starts/stops based on grid feed-in
-- 🎮 **GPU Monitoring** - Pauses automatically for games/Stable Diffusion
-- ⛏️ **Dual Miner Support** - Auto-detects QuickMiner (RTX 5000) or Excavator (legacy)
-- 🔄 **Enhanced Auto-Restart** - Fast health monitoring (every 2 min) + immediate retry on failures
-- 🤖 **Auto-Update** - Automatically updates Excavator and huawei-solar package on startup
-- 💰 **Earnings Tracking** - Shows current BTC earnings
-- 🌦️ **Weather Integration** - Cloud cover, temperature, solar radiation (Open-Meteo API)
-- 📊 **Comprehensive Logging** - CSV data for analysis + rotating error logs
-- 🌍 **Multilingual** - English/German CLI support (via LANGUAGE environment variable)
+   ```powershell
+   python -m venv .venv
+   .venv\Scripts\pip install -r requirements.txt
+   copy .env.example .env
+   ```
 
-## Miner Support
+3. Fill in `.env`: device IPs and a new password per Shelly device.
+4. Secure the Shelly plugs (sets the password and protects the setup access
+   point) and upload their scripts:
 
-### QuickMiner (Recommended)
-- ✅ RTX 5000 series support (RTX 5060 Ti, etc.)
-- ✅ Automatic profit switching (Autolykos2, KawPow, FishHash)
-- ✅ Modern algorithms
-- 📖 See `QUICKMINER_SETUP.md` for installation
+   ```powershell
+   .venv\Scripts\python tools\shelly_secure.py boiler
+   .venv\Scripts\python tools\shelly_deploy.py boiler
+   ```
 
-### Excavator (Legacy Fallback)
-- ⚠️ Limited to daggerhashimoto only
-- ⚠️ No RTX 5000 support
-- ✅ Auto-starts if QuickMiner not found
+   For the Color Bulb, set a password in its web interface or app.
+5. Test the hub in the foreground, then install it as a Windows task that
+   starts at logon:
 
-## Prerequisites
-
-- Python 3.10+
-- Huawei Solar Inverter (SUN2000 series) on network
-- NiceHash Excavator installed
-- NVIDIA GPU (tested with GTX 1070 Ti)
-
-## Installation
-
-```powershell
-# Activate virtual environment
-.venv\Scripts\Activate.ps1
-
-# Install packages
-pip install huawei-solar GPUtil psutil requests python-dotenv
-```
+   ```powershell
+   .venv\Scripts\python solar_hub.py
+   powershell -ExecutionPolicy Bypass -File tools\install_windows_task.ps1
+   ```
 
 ## Configuration
 
-**Important:** Configuration is done via `.env` file (not in code!)
+All settings are in [config.toml](config.toml) and commented there. The
+`[pool]` and `[boiler]` sections are written into the Shelly scripts by
+`tools/shelly_deploy.py`, so redeploy after changing them. For everything
+else restart the hub.
 
-```powershell
-# 1. Copy .env.example to .env
-cp .env.example .env
+### Pool pump – [shelly/pool_pump_solar.js](shelly/pool_pump_solar.js)
 
-# 2. Customize .env with your values
-notepad .env
-```
+A collector only heats the pool in strong sun; otherwise wind cools the
+water. The pump cycles (default 1 min on / 3 min off) while PV >= `onW` and
+stops below `offW`. PV power of a system with the same orientation is a
+better sun sensor than a weather model. Without hub data for 5 minutes the
+pump stays off.
 
-**Important settings in `.env`:**
+### Boiler – [shelly/boiler_solar.js](shelly/boiler_solar.js)
 
-```bash
-# Language (Supported: en, de)
-LANGUAGE=en
+| Time (defaults) | Behaviour |
+|---|---|
+| 23:00–09:00 | off |
+| 09:00–16:00 | surplus: switch on at PV >= 2 kW, wait 2 min, switch off again (retry after 15 min) if the grid still has to deliver > 300 W |
+| 16:00–23:00 | always on, the boiler's thermostat regulates – full before the evening showers |
 
-# Excavator path
-EXCAVATOR_PATH=H:\miner\excavator.exe
+The plug can't measure the water temperature, so the logic is deliberately
+pessimistic: the tank is always full in the evening, and if it wasn't full
+(thermostat cut off) for 24 h it heats outside the night. Without hub data
+it heats from 12:00. Set the plug's "power on" state to *on*, so the boiler
+works after a power cut even if the script doesn't.
 
-# Inverter IP
-INVERTER_HOST=192.168.18.206
-INVERTER_PORT=6607
+**Surplus-charging wallbox:** such a wallbox absorbs all surplus, so the
+surplus can't be computed. Huawei wallboxes also can't be read via Modbus
+(the vendor doesn't support it). The boiler therefore simply tries: it
+switches on, gives the wallbox time to regulate down and checks the grid
+import (house load minus PV).
 
-# NiceHash Wallet (REQUIRED!)
-NICEHASH_WALLET=YOUR_WALLET.worker_name
+### Color bulb – indicator in [solar_hub.py](solar_hub.py)
 
-# GPS coordinates for weather (customize!)
-WEATHER_LATITUDE=37.6931
-WEATHER_LONGITUDE=-0.8481
+| State | Day | Dark (PV below 400 W) |
+|---|---|---|
+| surplus: export >= 2 kW, enough for a dryer | very dark green | cool white |
+| cheapest tariff period | bright green | cool white |
+| middle tariff period | bright yellow/orange | neutral white |
+| most expensive period, PV >= 2 kW but no export (e.g. wallbox charging) | orange | warm white |
+| most expensive period, no PV | dark red | warm white |
 
-# Power thresholds (optional customization)
-MIN_POWER_TO_START=200
-MIN_POWER_TO_KEEP=150
-CHECK_INTERVAL=120        # Check every 2 minutes (reduces Modbus conflicts)
-ALARM_CHECK_INTERVAL=30   # Check alarms every 30 seconds
+In the dark the bulb is a normal lamp at full brightness and shows the state
+only as color temperature: it can't mix its white LEDs with color, and RGB
+white is too dim. The bulb is powered through the wall switch; after
+switching it on it gets its color within a few seconds.
 
-# GPU monitoring (optional disable)
-GPU_CHECK_ENABLED=True
-GPU_USAGE_THRESHOLD=10   # % - Pause on GPU usage
+### Tariff – [tariff.py](tariff.py)
 
-# Weather API (Open-Meteo - free!)
-WEATHER_ENABLED=True
-WEATHER_LATITUDE=40.4168    # Your GPS coordinates
-WEATHER_LONGITUDE=-3.7038
-```
-
-## Starting
-
-```powershell
-# In project folder
-python solar_mining_api.py
-```
-
-The script:
-1. **Checks for updates** - Auto-updates Excavator and huawei-solar if available
-2. Starts Excavator automatically
-3. Connects to inverter (with unlimited retry on failures)
-4. Monitors solar feed-in every 2 minutes
-5. Starts mining at ≥200W feed-in (after 3x confirmation)
-   - On failure: immediate retry up to 3 times within 30s
-6. Stops mining at <150W (after 5x confirmation)
-7. Pauses when GPU is used by other programs
-8. Health checks every 2 minutes (detects frozen Excavator quickly)
-
-**Stop:** `Ctrl+C`
-
-## What's New in v2.0
-
-### 🚀 Enhanced Stability & Auto-Update
-
-- **Continuous Health Monitoring**: Excavator health checked every iteration (2 min) instead of every 6 min → 3x faster problem detection
-- **Immediate Mining Retries**: When mining start fails, retries up to 3 times within 30s (instead of waiting 2 minutes)
-- **Auto-Update Excavator**: Automatically checks GitHub for latest version and updates on startup
-- **Auto-Update huawei-solar**: Automatically updates Python package from PyPI on startup
-- **Rotating Logs**: Error logs now rotate at 5MB (keeps last 5 backups)
-- **Excavator Process Logs**: Captures stdout/stderr to `logs/excavator/` for better debugging
-
-See `ENHANCED_STABILITY_UPDATE.md` for detailed documentation.
-
-## Output
-
-```
-[  5] 10:30:00
-      ☀️  Solar:        1250 W
-      🏠 Consumption:    480 W (House)
-      📤 Grid Export:    770 W (to grid)
-      ✨ Available:      770 W (for mining)
-      ⛏️  Mining:        🟢 RUNNING
-      📈 Hashrate:      27.12 MH/s
-      ⏱️  Session:       15m 30s
-      💰 Unpaid:        0.00012345 BTC
-      🌡️  Weather:       23.5°C, ☁️ 35%, ☀️ 680 W/m²
-```
-
-## Logging
-
-### Data Log: `logs/solar_data.csv`
-Every 30 seconds:
-- **Solar:** Production, feed-in, consumption, string data (PV1/PV2)
-- **Grid:** 3-phase details (voltage, current, power)
-- **Mining:** Status, hashrate, GPU temperature, GPU usage
-- **Inverter:** Temperature, efficiency, daily/total yield
-- **Weather:** Temperature, cloud cover, wind, solar radiation (W/m²)
-- **Battery:** Charge/discharge power, State of Charge (if available)
-
-**Use for:**
-- Excel/Google Sheets
-- Create graphs (Solar vs. cloud cover!)
-- ML training (prediction models)
-- Long-term analysis
-
-### Error Log: `logs/errors.log`
-Detailed error information:
-- API connection problems
-- Excavator crashes
-- Inverter connection errors
-- Complete tracebacks
-
-## Tools
-
-### Analyze Data
-```powershell
-# Statistics + plots (requires pandas + matplotlib)
-pip install pandas matplotlib
-python analyze_data.py
-```
-
-Creates:
-- `logs/solar_mining_analysis.png` - Overview (solar, mining, hashrate, GPU)
-- `logs/daily_pattern.png` - Daily patterns (hourly averages)
-- `logs/ml_training_data.csv` - Prepared for ML
-
-### View Errors
-```powershell
-python view_errors.py        # Last 24h
-python view_errors.py 6      # Last 6h
-```
-
-## GPU Monitoring
-
-Automatic pause for:
-- 🎮 **Gaming**: Rocket League, CS2, Valorant, etc.
-- 🎨 **Stable Diffusion**: Detects Python processes with SD keywords
-- 🎬 **Video/3D**: Blender, Premiere, After Effects, etc.
-
-**Add custom programs:**
-```python
-# In solar_mining_api.py, line ~175
-gpu_intensive_processes = [
-    'RocketLeague.exe',
-    'MyGame.exe',  # <-- Add here
-]
-```
-
-**Disable feature:**
-```bash
-GPU_CHECK_ENABLED=False
-```
-
-## Windows Service (24/7)
-
-Install as service with NSSM:
-
-```powershell
-# Download NSSM: nssm.cc
-nssm install SolarMining "C:\path\to\your\solar-ai\.venv\Scripts\python.exe"
-nssm set SolarMining AppParameters "C:\path\to\your\solar-ai\solar_mining_api.py"
-nssm set SolarMining AppDirectory "C:\path\to\your\solar-ai"
-nssm set SolarMining Start SERVICE_AUTO_START
-
-# Start service
-nssm start SolarMining
-```
-
-## Troubleshooting
-
-### "Excavator not responding"
-- Excavator restarts automatically
-- Check: `logs/errors.log`
-- Manual: Close Excavator and restart script
-
-### "Inverter connection" error
-- IP correct? `INVERTER_HOST="192.168.18.206"`
-- Inverter reachable? `ping 192.168.18.206`
-- Port open? Check firewall
-
-### Mining doesn't start
-- Enough feed-in? Needs ≥200W for 3x30s
-- GPU free? Other programs active?
-- Check console output + `logs/errors.log`
-
-### CSV file too large
-```powershell
-# Archive old data
-Move-Item logs\solar_data.csv logs\solar_data_$(Get-Date -Format 'yyyy-MM').csv
-# New CSV header will be created automatically
-```
-
-## Technical Details
-
-**Hardware:**
-- Huawei SUN2000-6KTL-L1 Inverter
-- NVIDIA GeForce GTX 1070 Ti (~180W, ~27 MH/s)
-
-**Software:**
-- NiceHash Excavator v1.9.x
-- Modbus TCP (Port 6607)
-- Excavator API (TCP Port 3456)
-
-**Algorithm:** DaggerHashimoto (Ethereum)
-
-**Hysteresis:**
-- 3x confirmations (90s) to start
-- 5x confirmations (150s) to stop
-- Prevents constant on/off with fluctuating solar
+Periods, holidays and prices come from `[tariff]` in config.toml. The
+defaults are the Spanish 2.0TD tariff (P1 punta, P2 llano, P3 valle; weekends
+and fixed-date national holidays are P3).
 
 ## Files
 
-```
-test/
-├── solar_mining_api.py       # Main script (Windows)
-├── solar_mining_pi.py        # Monitoring script (Raspberry Pi)
-├── solar_core.py             # Shared components
-├── translations.py           # Multilingual support (EN/DE)
-├── analyze_data.py           # Data analysis tool
-├── view_errors.py            # Error log viewer
-├── README.md                 # This file
-├── AUTOSTART_GUIDE.md        # Windows autostart setup
-├── MULTILANG_GUIDE.md        # Multilingual implementation guide
-├── .env                      # Configuration (create from .env.example)
-├── logs/
-│   ├── solar_data.csv        # Data log
-│   └── errors.log            # Error log
-└── .venv/                    # Python virtual environment
-```
+| Path | Purpose |
+|---|---|
+| `solar_hub.py` | the hub |
+| `config.toml`, `config.py` | settings |
+| `tariff.py` | tariff periods |
+| `shelly/*.js` | scripts running on the Shelly plugs |
+| `tools/shelly_deploy.py` | upload a Shelly script with its settings |
+| `tools/shelly_secure.py` | set password and protect the setup AP of a new Shelly |
+| `tools/install_windows_task.ps1` | run the hub at logon |
+| `logs/hub.csv` | one row per minute: PV, load, tariff, device states |
 
-## Documentation
+Script status on a plug: `http://<plug>/script/<id>/status` (user `admin`).
 
-- **[AUTOSTART_GUIDE.md](AUTOSTART_GUIDE.md)** - Windows autostart setup guide
-- **[MULTILANG_GUIDE.md](MULTILANG_GUIDE.md)** - Multilingual implementation details
-- **[README_RASPBERRY_PI.md](README_RASPBERRY_PI.md)** - Raspberry Pi monitoring setup
-- **[DEPLOYMENT.md](DEPLOYMENT.md)** - Deployment and setup instructions
-- **[QUICKSTART_PI.md](QUICKSTART_PI.md)** - Quick start guide for Raspberry Pi
+## History
 
-## Contributing
-
-Contributions are welcome! This project follows professional development standards:
-
-**Code Quality Standards:**
-- ✅ **Language:** All code, comments, and docstrings in English
-- ✅ **Style:** PEP 8 compliant Python
-- ✅ **Architecture:** Follow existing patterns (see `solar_core.py` for shared components)
-- ✅ **Translations:** Add new languages via `translations.py` (see [MULTILANG_GUIDE.md](MULTILANG_GUIDE.md))
-
-**How to Contribute:**
-
-1. **Fork** the repository
-2. **Create** a feature branch
-   ```bash
-   git checkout -b feature/amazing-feature
-   ```
-3. **Make your changes**
-   - Write English code/comments
-   - Add translations if user-facing
-   - Test on your hardware
-4. **Commit** with clear messages
-   ```bash
-   git commit -m 'feat: Add support for XYZ inverter'
-   ```
-5. **Push** to your branch
-   ```bash
-   git push origin feature/amazing-feature
-   ```
-6. **Open** a Pull Request
-
-**Areas for Contribution:**
-- 🔌 Support for other inverter brands (Fronius, SolarEdge, etc.)
-- 🌍 Additional language translations
-- 📊 Enhanced data analysis features
-- 🎮 More GPU-intensive process detection
-- 🐛 Bug fixes and optimizations
-- 📖 Documentation improvements
-
-**Questions?** Open an issue or discussion on GitHub!
+This project started as a controller that mined crypto on the GPU with solar
+surplus. That code was removed; it is still in the git history.
 
 ## License
 
-**Solar Mining Controller** - Copyright (c) 2025 Lennart Kipper
-
-Licensed under [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
-
-**License Summary:**
-- ✅ **Free for personal and hobby use** - Use, modify, and share freely
-- ✅ **Share improvements** - Derivatives must use the same license
-- ✅ **Give credit** - Must attribute original author
-- ❌ **No commercial use** - Cannot sell, monetize, or use commercially
-- 💼 **Commercial licensing available** - Contact author for commercial options
-
-See [LICENSE](LICENSE) for full terms.
-
-**No Warranty:** This software is provided "as is", without warranty of any kind.
+CC BY-NC-SA 4.0, see [LICENSE](LICENSE).
