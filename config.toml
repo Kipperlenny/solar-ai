@@ -131,7 +131,7 @@ pv_install_fixed_eur = 1300              # cabling, protection, legalization
 ev_kwh_per_100km = 17            # electric car, real-world consumption from the battery
 ev_charging_loss = 0.10          # wallbox to battery
 diesel_l_per_100km = 7.5         # combustion car
-diesel_eur_per_l = 1.45
+diesel_eur_per_l = 1.45          # fallback; the weekly official price from [fuel] is used when logged
 
 # Comparison with investing the same money in an MSCI World ETF instead.
 [simulation.finance]
@@ -174,6 +174,13 @@ essential_kw = 0.3               # fridge and some lights, on the generator in e
 emergency_start_soc = 0.05       # emergency mode when the battery falls to 5 %
 emergency_stop_soc = 0.3         # back to normal when the sun has recharged it to 30 %
 max_emergency_days = 10          # acceptable emergency days per year: picks the recommended setup
+
+# Official fuel prices (Ministerio de Industria), logged weekly to logs/fuel.csv: median of the
+# stations in a province (INE code, e.g. 30 = Murcia) and optionally one municipality.
+# Put yours into config.local.toml; empty = off.
+[fuel]
+province = 0
+municipality = ""
 
 # Shop prices, logged weekly to logs/prices.csv (prices.py); prices incl. 21 % VAT.
 # per: kWh (battery), kWp (panels) or unit; size in that unit. Only shops whose robots.txt allows it.

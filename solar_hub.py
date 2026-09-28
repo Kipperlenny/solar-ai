@@ -368,6 +368,10 @@ class Hub:
                 new_bills = bills.scan()
                 if prices.due():
                     new_bills += prices.check()  # new prices: recalculate too
+                    try:
+                        new_bills += prices.check_fuel()
+                    except Exception:
+                        log.exception("Fuel price check failed")
                 if fusionsolar.sync() or new_bills or not simulate.OUT_FILE.exists():
                     simulate.run()
                     log.info("Investment simulation updated")

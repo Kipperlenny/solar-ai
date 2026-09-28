@@ -350,7 +350,7 @@ async function loadSimulation() {
     `"DC on the SUN2000": a LUNA2000 on the existing inverter, it also stores what the power limit cuts off. "AC": a separate battery system.`,
     `Extra panels: ${a.extra_pv_tilt}° tilt on their own inverter, production from PVGIS scaled with each real day's weather.`,
     `Purchase prices: shop prices checked ${r.prices.checked ?? "never"} (median): battery ${r.prices.battery_eur_per_kwh} €/kWh, panels ${r.prices.panel_eur_per_kwp} €/kWp, inverter ${r.prices.inverter_eur} € - plus installation (battery ${a.battery_install_eur} €; panels ${a.pv_mounting_install_eur_per_kwp} €/kWp mounting and labour + ${a.pv_install_fixed_eur} € cabling, protection and legalization). A real quote replaces them in config.toml [simulation].`,
-    `Car: 1 kWh at the wallbox = ${r.car.km_per_kwh} km in the electric car = ${r.car.diesel_eur_per_kwh.toFixed(2)} € fuel in a combustion car. Extra PV the car takes instead of exporting is worth that, not the export price - not counted above.`,
+    `Car: 1 kWh at the wallbox = ${r.car.km_per_kwh} km in the electric car = ${r.car.diesel_eur_per_kwh.toFixed(2)} € fuel in a combustion car (diesel ${r.car.diesel_eur_per_l.toFixed(3)} €/l${r.car.fuel_date ? ", official median " + r.car.fuel_date : ", assumed"}). Extra PV the car takes instead of exporting is worth that, not the export price - not counted above.`,
   ]) { const li = document.createElement("li"); li.textContent = text; n.appendChild(li); }
 
   const tn = document.createElement("li");

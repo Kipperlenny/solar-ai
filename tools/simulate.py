@@ -412,7 +412,8 @@ def run():
                "inverter_eur": shop.get("offgrid_inverter", og["inverter_eur"])}
     grid_cost_today = cost(base, ex[0]) * scale + grid_fixed_cost()
     ev_km_per_kwh = (1 - SIM["ev_charging_loss"]) * 100 / SIM["ev_kwh_per_100km"]
-    diesel_per_kwh = ev_km_per_kwh * SIM["diesel_l_per_100km"] / 100 * SIM["diesel_eur_per_l"]
+    fuel_now = prices.latest_fuel()
+    diesel_per_kwh = ev_km_per_kwh * SIM["diesel_l_per_100km"] / 100 * (fuel_now[0] if fuel_now else SIM["diesel_eur_per_l"])
     options = []
     for kwp_extra in og["extra_pv_kwp"]:
         pv_of = (lambda k: lambda r: min(unclipped(r), inv_max) + per_kwp_day.get(r["day"], 0) * k * steep(r["utc"]))(kwp_extra)
@@ -476,6 +477,8 @@ def run():
                                                       t.get("virtual_battery", False)) * scale)})
 
     ev_km = (1 - SIM["ev_charging_loss"]) * 100 / SIM["ev_kwh_per_100km"]
+    fuel = prices.latest_fuel()
+    diesel_eur_per_l = fuel[0] if fuel else SIM["diesel_eur_per_l"]
     result = {
         "generated": datetime.now().isoformat(timespec="minutes"),
         "days": days, "first_day": rows[0]["day"], "last_day": rows[-1]["day"],
@@ -492,7 +495,8 @@ def run():
         "finance": SIM["finance"],
         "excluded_days": len({r["day"] for r in all_rows}) - len({r["day"] for r in rows}),
         "car": {"km_per_kwh": round(ev_km, 1),
-                "diesel_eur_per_kwh": round(ev_km * SIM["diesel_l_per_100km"] / 100 * SIM["diesel_eur_per_l"], 2)},
+                "diesel_eur_per_kwh": round(ev_km * SIM["diesel_l_per_100km"] / 100 * diesel_eur_per_l, 2),
+                "diesel_eur_per_l": diesel_eur_per_l, "fuel_date": fuel[2] if fuel else None},
         "prices": {**{k: round(v) for k, v in unit.items()}, **price_info},
         "assumptions": {k: SIM[k] for k in ("battery_power_kw", "battery_efficiency", "battery_install_eur",
                                             "pv_mounting_install_eur_per_kwp", "pv_install_fixed_eur",
