@@ -70,7 +70,10 @@ Each device is optional: leave its host empty in `.env` and it is skipped.
 
 ## Configuration
 
-All settings are in [config.toml](config.toml) and commented there. The
+All settings are in [config.toml](config.toml) and commented there. Own
+values that shouldn't be public - contract, the prices you pay, invoices or
+quotes, vehicles, special periods - go into `config.local.toml` (not in git),
+which overrides `config.toml` table by table. The
 `[pool]` and `[boiler]` sections are written into the Shelly scripts by
 `tools/shelly_deploy.py`, so redeploy after changing them. For everything
 else restart the hub.
@@ -79,7 +82,11 @@ else restart the hub.
 
 A collector only heats the pool in strong sun; otherwise wind cools the
 water. The pump cycles (default 1 min on / 3 min off) while PV >= `onW` and
-stops below `offW`. PV power of a system with the same orientation is a
+the sun stands at least `minElevation` (35°) high, and stops below `offW` or
+when the sun gets lower. The collector lies flat, so the sun's direction
+doesn't matter, only its height; the hub computes it from
+`WEATHER_LATITUDE`/`WEATHER_LONGITUDE` in [sun.py](sun.py). In mid-winter the
+sun doesn't reach 35° here, so the pump stays off. PV power of a system with the same orientation is a
 better sun sensor than a weather model. Without hub data for 5 minutes the
 pump stays off.
 
@@ -107,16 +114,67 @@ import (house load minus PV).
 
 | State | Day | Dark (PV below 400 W) |
 |---|---|---|
-| surplus: export >= 2 kW, enough for a dryer | very dark green | cool white |
-| cheapest tariff period | bright green | cool white |
-| middle tariff period | bright yellow/orange | neutral white |
+| surplus: export >= 2 kW, enough for a dryer | green | cool white |
+| cheapest tariff period | green | cool white |
+| middle tariff period | yellow/orange | neutral white |
+| most expensive period, but export >= 500 W: small loads OK | yellow | neutral white |
 | most expensive period, PV >= 2 kW but no export (e.g. wallbox charging) | orange | warm white |
-| most expensive period, no PV | dark red | warm white |
+| most expensive period, buying or barely exporting | red | warm white |
+
+During the day all colors are very dim (5 %).
 
 In the dark the bulb is a normal lamp at full brightness and shows the state
 only as color temperature: it can't mix its white LEDs with color, and RGB
 white is too dim. The bulb is powered through the wall switch; after
 switching it on it gets its color within a few seconds.
+
+### Dashboard – [dashboard.py](dashboard.py)
+
+http://localhost:8765 (port in `[dashboard]`) shows PV, load, grid and tariff,
+the state of bulb, boiler and pool pump with the reason for each, and the log
+(filterable, "only decisions" shows just the changes with their reasons). It
+runs inside the hub, so it starts with the scheduled task. Only reachable
+from this computer.
+
+### FusionSolar history and wallbox – [fusionsolar.py](fusionsolar.py)
+
+Every 6 hours the hub appends the 5-minute history (PV, consumption, grid)
+from the FusionSolar cloud to `logs/fusionsolar.csv`, back to the grid
+connection date. Needs `FUSION_SOLAR_*` in `.env`; read-only, via the
+unofficial `fusion_solar_py` (pinned, audited - its `active_power_control`
+writes to the dongle and is never used). The wallbox can't be read locally;
+its energy counter in the cloud updates about every 2 minutes, which gives the
+charging power on the dashboard and `logs/wallbox.csv`.
+
+### Bills – [bills.py](bills.py)
+
+Put the electricity bills (PDF) into `bills/` (not in git - personal data). The
+hub reads new ones within 10 minutes into `logs/bills.json`; the dashboard
+shows them next to the FusionSolar measurement of the same days, including
+the "Batería Virtual" (export credit beyond a month's energy cost, spent on
+another bill). The simulation calibrates its grid kWh to the bills.
+
+### Investment simulation – [tools/simulate.py](tools/simulate.py)
+
+`python tools/simulate.py` replays the real year with a battery (AC or
+DC-coupled), extra east/west panels, or the inverter back at full power, and
+prints kWh bought per period, export and savings per year for several export
+prices. Panels we don't have come from PVGIS, scaled with each day's real
+production. Assumed prices and car figures are in `[simulation]`.
+
+### Prices – [prices.py](prices.py)
+
+Once a week the hub logs shop prices of batteries, panels and inverters
+(products in `[prices]`, shops whose robots.txt allows it) to
+`logs/prices.csv`. The simulation uses the latest median plus installation
+installation costs from `[simulation]` (own invoices or quotes in `config.local.toml`).
+
+### Special periods
+
+Vacations and visitors distort the average year. Mark them in `config.toml`
+as `[[events]]`: one-off periods are left out of the simulation, recurring
+ones (Christmas, the yearly holiday) stay in. The dashboard lists unusual
+periods that aren't marked yet.
 
 ### Tariff – [tariff.py](tariff.py)
 
@@ -129,13 +187,27 @@ and fixed-date national holidays are P3).
 | Path | Purpose |
 |---|---|
 | `solar_hub.py` | the hub |
+| `dashboard.py` | local web dashboard |
 | `config.toml`, `config.py` | settings |
+| `config.local.toml` | own values overriding config.toml (not in git) |
 | `tariff.py` | tariff periods |
+| `sun.py` | sun position |
+| `fusionsolar.py` | FusionSolar history, wallbox power, inverter values |
+| `bills.py` | reads the bills in bills/ |
+| `prices.py` | weekly shop prices |
+| `tools/simulate.py` | battery / extra PV / off-grid simulation, ETF comparison |
+| `docs/ML_PLAN.md` | machine learning plan (not built yet) |
 | `shelly/*.js` | scripts running on the Shelly plugs |
 | `tools/shelly_deploy.py` | upload a Shelly script with its settings |
 | `tools/shelly_secure.py` | set password and protect the setup AP of a new Shelly |
 | `tools/install_windows_task.ps1` | run the hub at logon |
 | `logs/hub.csv` | one row per minute: PV, load, tariff, device states |
+| `logs/hub.log` | log, including every state change with its reason |
+| `logs/fusionsolar.csv` | 5-minute PV, consumption and grid since the grid connection |
+| `logs/wallbox.csv` | wallbox energy counter and charging power |
+| `bills/` | electricity bills (PDF, not in git) |
+| `other/` | installation invoices, support mails (not in git) |
+| `logs/prices.csv` | shop prices over time |
 
 Script status on a plug: `http://<plug>/script/<id>/status` (user `admin`).
 

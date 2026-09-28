@@ -18,3 +18,10 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Electricity bills (personal data)
+bills/
+*.pdf
+other/
+# Own values that override config.toml
+config.local.toml

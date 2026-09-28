@@ -1,11 +1,12 @@
 // Pool pump solar control for Shelly Gen2+/Gen3 plugs
 // Runs an on/off cycle only while the sun is strong enough to heat a solar
-// collector. Otherwise the pump stays off, because wind would cool the water
-// in the collector.
+// collector and stands high enough (the collector lies flat, so a low sun
+// hardly heats it). Otherwise the pump stays off, because wind would cool
+// the water in the collector.
 //
-// Sun source: PV input power of a PV system with the same orientation,
-// pushed by solar_hub.py every minute:
-//   http://<plug-ip>/script/<id>/pv?w=<watts>
+// Sun source: PV input power and sun elevation in degrees, pushed by
+// solar_hub.py every minute:
+//   http://<plug-ip>/script/<id>/pv?w=<watts>&el=<degrees>
 // Status: http://<plug-ip>/script/<id>/status
 //
 // Settings come from config.toml [pool]; tools/shelly_deploy.py replaces the
@@ -17,13 +18,15 @@ let CFG = {
   offW: 2000,
   onMin: 1,
   offMin: 3,
-  maxPvAgeSec: 300
+  maxPvAgeSec: 300,
+  minElevation: 35
 };
 // CONFIG-END
 
 let state = {
   sunOk: false,
   pvW: null,
+  elevation: null,
   lastPvTs: 0,
   cyclePos: 0,
   pumpOn: false
@@ -38,11 +41,13 @@ function now() {
   return Shelly.getComponentStatus("sys").unixtime;
 }
 
-function updatePv(w) {
+function updatePv(w, el) {
   state.pvW = w;
+  state.elevation = el;
   state.lastPvTs = now();
-  if (!state.sunOk && w >= CFG.onW) state.sunOk = true;
-  if (state.sunOk && w < CFG.offW) state.sunOk = false;
+  let high = el >= CFG.minElevation;
+  if (!state.sunOk && w >= CFG.onW && high) state.sunOk = true;
+  if (state.sunOk && (w < CFG.offW || !high)) state.sunOk = false;
 }
 
 function tick() {
@@ -66,13 +71,17 @@ function reply(resp, code, obj) {
 }
 
 HTTPServer.registerEndpoint("pv", function (req, resp) {
-  let q = req.query || "";
-  let w = q.indexOf("w=") === 0 ? Number(q.slice(2)) : NaN;
-  if (isNaN(w)) {
-    reply(resp, 400, { error: "expected ?w=<watts>" });
+  let q = {};
+  let parts = (req.query || "").split("&");
+  for (let i = 0; i < parts.length; i++) {
+    let kv = parts[i].split("=");
+    q[kv[0]] = Number(kv[1]);
+  }
+  if (isNaN(q.w) || isNaN(q.el)) {
+    reply(resp, 400, { error: "expected ?w=<watts>&el=<degrees>" });
     return;
   }
-  updatePv(w);
+  updatePv(q.w, q.el);
   reply(resp, 200, { sunOk: state.sunOk, pumpOn: state.pumpOn });
 });
 

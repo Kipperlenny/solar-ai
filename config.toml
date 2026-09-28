@@ -4,6 +4,8 @@
 #   python tools/shelly_deploy.py pool
 #   python tools/shelly_deploy.py boiler
 # After changing anything else, restart solar_hub.py.
+# Own values that shouldn't be public (contract, prices you pay, quotes, vehicles) go into
+# config.local.toml, which is not in git and overrides this file table by table.
 
 [hub]
 interval_sec = 60          # how often the SDongle is read and data is pushed
@@ -23,8 +25,10 @@ weekday_periods = [
 weekend_period = "P3"
 # Fixed-date national holidays ("MM-DD"); regional and movable holidays don't count for 2.0TD.
 holidays = ["01-01", "01-06", "05-01", "08-15", "10-12", "11-01", "12-06", "12-08", "12-25"]
-# Only used for logging. Cheapest period = "cheap", most expensive = "expensive" for the bulb.
-prices_eur_kwh = { P1 = 0.231734, P2 = 0.138888, P3 = 0.093991 }
+# Energy prices incl. electricity tax (5.1127 %) and VAT (21 %), i.e. net price x 1.2719.
+# Example values of a time-of-use offer - put your own in config.local.toml.
+# Cheapest period = "cheap", most expensive = "expensive" for the bulb.
+prices_eur_kwh = { P1 = 0.23, P2 = 0.14, P3 = 0.09 }
 
 # Pool pump behind a solar collector: only run in strong sun.
 # Keys are passed as-is to shelly/pool_pump_solar.js.
@@ -34,6 +38,7 @@ offW = 2000                # stop cycling below this PV power
 onMin = 1                  # pump on minutes per cycle
 offMin = 3                 # pump off minutes per cycle
 maxPvAgeSec = 300          # switch off if the hub sends no PV value for this long
+minElevation = 35          # sun height in degrees; the collector lies flat, a low sun hardly heats it
 
 # Electric hot water boiler.
 # Keys are passed as-is to shelly/boiler_solar.js.
@@ -59,16 +64,20 @@ dark_below_pv_w = 400      # "dark outside": the light is needed, use bright whi
 bright_above_pv_w = 600
 surplus_on_export_w = 2000   # real surplus, enough to start e.g. a dryer
 surplus_off_export_w = 1200
+export_on_w = 500           # expensive tariff, but some PV to spare: small loads OK
+export_off_w = 300
 consumed_above_pv_w = 2000   # PV is there, but a load (e.g. surplus-charging wallbox) takes it
 consumed_below_export_w = 300
+consumed_max_import_w = 500    # more import than this is red, e.g. car charging at full power
 
 # Daytime colors as [red, green, blue, gain %].
 [bulb.day_colors]
-surplus = [0, 255, 0, 8]               # very dark green: switch on big loads now
-cheap = [0, 255, 0, 100]               # bright green: cheapest tariff
-mid = [255, 180, 0, 100]               # bright yellow/orange: middle tariff
-expensive_consumed = [255, 80, 0, 100]  # orange: expensive, PV taken by a load
-expensive = [255, 0, 0, 15]            # dark red: expensive, no PV
+surplus = [0, 255, 0, 2]               # very dark green: switch on big loads now
+cheap = [0, 255, 0, 2]                 # green: cheapest tariff
+mid = [255, 180, 0, 5]                # yellow/orange: middle tariff
+export = [255, 180, 0, 5]             # yellow: expensive tariff, but exporting (small loads OK)
+expensive_consumed = [255, 80, 0, 5]   # orange: expensive, PV taken by a load
+expensive = [255, 0, 0, 1]             # very dark red: expensive, no PV
 unknown = [255, 255, 255, 30]          # no data
 
 # In the dark: white mode as [color temperature K (3000-6500), brightness %].
@@ -77,6 +86,119 @@ unknown = [255, 255, 255, 30]          # no data
 surplus = [6500, 100]
 cheap = [6500, 100]
 mid = [4500, 100]
+export = [4500, 100]
 expensive_consumed = [3000, 100]
 expensive = [3000, 100]
 unknown = [4500, 100]
+
+# Local web dashboard (current state, reasons, log), part of solar_hub.py.
+[dashboard]
+port = 8765
+
+# Investment simulation (tools/simulate.py) on the real 5-minute history.
+[simulation]
+tax_factor = 1.2719              # electricity tax 5.1127 % and VAT 21 %
+export_prices_eur_kwh = [0.06, 0.04, 0.0]   # net, before taxes (the credit reduces the taxed amount)
+pv_kwp_installed = 6.0           # existing panels
+inverter_max_kw = 6.0            # rated AC power (a lower limit set in the inverter shows as clipping)
+battery_power_kw = 5.0
+battery_efficiency = 0.90        # round trip
+battery_sizes_kwh = [5, 10, 15]
+extra_pv_kwp = [2, 4]            # extra panels on their own inverter, split per layout below
+extra_pv_tilt = 15               # flat roof mounting
+# Tariffs compared on the measured year (net prices before tax); your offers go into config.local.toml.
+# virtual_battery: the retailer keeps export credit beyond a month's energy cost as a balance
+# ("batería virtual") that pays later bills; without it, that excess is lost each month
+# (compensación simplificada is capped monthly).
+# Format: { name = "...", energy_eur_kwh = { P1 = .., P2 = .., P3 = .. } or { all = .. },
+# export_eur_kwh = .., virtual_battery = true/false }.
+tariffs = [
+  { name = "Example time-of-use tariff", energy_eur_kwh = { P1 = 0.18, P2 = 0.107, P3 = 0.072 }, export_eur_kwh = 0.06, virtual_battery = true },
+  { name = "Example flat tariff", energy_eur_kwh = { all = 0.112 }, export_eur_kwh = 0.06, virtual_battery = true },
+  { name = "Example time-of-use tariff without virtual battery", energy_eur_kwh = { P1 = 0.18, P2 = 0.107, P3 = 0.072 }, export_eur_kwh = 0.06, virtual_battery = false },
+]
+# Purchase prices: hardware comes from the weekly shop prices ([prices], logs/prices.csv);
+# these are only fallbacks. Installation can't be scraped - replace with a quote.
+battery_eur_per_kwh = 550            # fallback
+panel_eur_per_kwp = 180              # fallback
+pv_inverter_eur = 650                # fallback, also used as the AC battery's own hybrid inverter
+# Installation incl. VAT: rough Spanish residential prices - put your invoices or quotes
+# into config.local.toml.
+battery_install_eur = 900                # electrician, material, commissioning
+pv_mounting_install_eur_per_kwp = 400    # mounting structure and labour per kWp
+pv_install_fixed_eur = 1300              # cabling, protection, legalization
+# Car: what a kWh into the electric car is worth when it replaces a combustion car's fuel.
+ev_kwh_per_100km = 17            # electric car, real-world consumption from the battery
+ev_charging_loss = 0.10          # wallbox to battery
+diesel_l_per_100km = 7.5         # combustion car
+diesel_eur_per_l = 1.45
+
+# Comparison with investing the same money in an MSCI World ETF instead.
+[simulation.finance]
+etf_return = 0.06                # per year, nominal; MSCI World long-term roughly 6-8 %, conservative
+capital_gains_tax = 0.21         # Spain, savings income 19-23 % (21 % band from 6,000 € gains)
+electricity_price_growth = 0.02  # per year; savings grow with it
+pv_degradation = 0.005           # panels lose about 0.5 % per year
+pv_lifetime_years = 25
+battery_lifetime_years = 15      # also used for the off-grid system (its batteries dominate)
+
+# Grid connection costs we'd save when off-grid (regulated 2.0TD prices 2026, net).
+[simulation.grid_fixed]
+contracted_kw = 4.6              # your contracted power in config.local.toml
+power_p1_eur_kw_day = 0.12303
+power_p2_eur_kw_day = 0.037337
+bono_social_eur_day = 0.024688
+meter_eur_day = 0.02663
+electricity_tax = 0.051127
+vat = 0.21
+
+# Full autonomy (no grid connection): off-grid hybrid inverters with 48 V LFP batteries. The
+# existing SUN2000 stays AC-coupled (to confirm with the installer); extra panels go straight
+# into the off-grid inverters, tilted steeper for the winter sun. When the batteries run low the
+# house goes into emergency mode like during a grid outage today: the generator runs only the
+# essentials (fridge, some lights), everything else stays off until the sun has recharged.
+[simulation.offgrid]
+extra_pv_kwp = [0, 4, 8, 12]
+battery_kwh = [16, 32, 48, 64, 96]
+extra_pv_tilt = 35
+inverter_kw = 8                  # continuous power per off-grid inverter (Deye SUN-8K class)
+battery_eur_per_kwh = 150        # fallback, weekly shop price otherwise
+inverter_eur = 1300              # fallback, weekly shop price otherwise
+install_eur = 2300               # labour and cabling
+generator_name = "petrol generator"
+generator_eur = 700              # purchase price; 0 if you already own one
+generator_kw = 2.8               # rated power
+generator_eur_per_kwh = 0.65     # petrol about 1.60 €/l, about 2.5 kWh per litre for a small open-frame unit
+generator_upkeep_eur_year = 100  # oil, spark plug, wear
+essential_kw = 0.3               # fridge and some lights, on the generator in emergency mode
+emergency_start_soc = 0.05       # emergency mode when the battery falls to 5 %
+emergency_stop_soc = 0.3         # back to normal when the sun has recharged it to 30 %
+max_emergency_days = 10          # acceptable emergency days per year: picks the recommended setup
+
+# Shop prices, logged weekly to logs/prices.csv (prices.py); prices incl. 21 % VAT.
+# per: kWh (battery), kWp (panels) or unit; size in that unit. Only shops whose robots.txt allows it.
+[prices]
+interval_days = 7
+items = [
+  { key = "battery", name = "Huawei LUNA2000-5-S0 5 kWh (incl. power module)", per = "kWh", size = 5, url = "https://www.teknosolar.com/bateria-de-litio-huawei-luna2000-5-s0-5kwh/" },
+  { key = "battery_extra", name = "Huawei LUNA2000-5-E1 5 kWh extra module", per = "kWh", size = 5, url = "https://www.teknosolar.com/modulo-de-bateria-de-litio-huawei-luna2000-5-e1-5kwh/" },
+  { key = "battery", name = "Huawei LUNA2000-7-S1 6.9 kWh", per = "kWh", size = 6.9, url = "https://www.teknosolar.com/bateria-de-litio-huawei-luna2000-7-s1-69-kwh/" },
+  { key = "battery", name = "Huawei LUNA2000-7-S1 6.9 kWh", per = "kWh", size = 6.9, url = "https://www.monsolar.com/huawei-luna2000-7-s1.html" },
+  { key = "panel", name = "JA Solar JAM72S20 455 Wp", per = "kWp", size = 0.455, url = "https://www.teknosolar.com/placa-solar-ja-solar-jam72s20-455-mr-455wp/" },
+  { key = "pv_inverter", name = "Huawei SUN2000-3KTL-L1 3 kW", per = "unit", size = 1, url = "https://www.teknosolar.com/inversor-hibrido-huawei-sun2000l-3kw-smart-energy-center/" },
+  # Off-grid equipment (autonomy scenario)
+  { key = "offgrid_inverter", name = "Victron MultiPlus-II 48/8000 (6.4 kW)", per = "unit", size = 1, url = "https://www.teknosolar.com/inversor-cargador-victron-energy-multiplus-ii-48-8000-110-100-230v/" },
+  { key = "offgrid_inverter", name = "Deye SUN-8K-SG05 hybrid 8 kW (off-grid capable)", per = "unit", size = 1, url = "https://cuencasolar.es/producto/inversor-hibrido-deye-sun-8kw-monofasico/" },
+  { key = "battery_48v", name = "Luxpower PGEM Max 16.08 kWh 48 V LFP", per = "kWh", size = 16.08, url = "https://www.teknosolar.com/bateria-de-litio-luxpower-pgem-max-1608kwh-48v/" },
+]
+
+# Special periods (vacation, visitors). recurring = true: happens every year (e.g. Christmas with the
+# family), stays in the average year. recurring = false: one-off, left out of the simulation.
+# The dashboard lists unusual periods that are not marked yet.
+# Put your own periods into config.local.toml, e.g.:
+# [[events]]
+# from = "2027-08-01"
+# to = "2027-08-21"
+# kind = "vacation"
+# recurring = true
+# note = "summer holiday"

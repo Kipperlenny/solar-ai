@@ -9,6 +9,8 @@ aiohttp>=3.9
 paho-mqtt>=2.0
 zeroconf>=0.130        # mDNS discovery (Shelly etc.)
 python-dotenv>=1.0
+pypdf>=5.0               # reading the electricity bills in bills/
+fusion_solar_py==0.1.2  # FusionSolar cloud history, read-only; pinned: audited, re-audit before upgrading
 
 # Data analysis
 pandas>=2.2
