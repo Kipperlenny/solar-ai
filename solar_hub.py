@@ -40,6 +40,7 @@ REG_PV_AND_LOAD = 37498  # 37498 total input power, 37500 load power: U32 W each
 
 LOG_DIR = ROOT / "logs"
 CSV_FILE = LOG_DIR / "hub.csv"
+DEVICES_CSV = LOG_DIR / "devices.csv"  # per minute: boiler power (hot water use), pool, wallbox, inverter
 
 log = logging.getLogger("solar_hub")
 
@@ -305,6 +306,11 @@ class Hub:
             cur = self.snap[name]
             if cur["on"] is not None and prev.get(name, {}).get("on") != cur["on"]:
                 log.info("%s %s: %s", name.capitalize(), "on" if cur["on"] else "off", cur["reason"])
+        append_devices_csv([
+            now.isoformat(timespec="seconds"), self.snap["boiler"]["on"], self.snap["boiler"]["mode"],
+            self.snap["boiler"]["power_w"], self.snap["pool"]["on"], self.wallbox.power_w,
+            self.inverter.values.get("temp_c"), self.inverter.values.get("grid_v"),
+        ])
         append_csv([
             now.isoformat(timespec="seconds"), pv, load, p, price(p), state, dark,
             pool and pool.get("sunOk"), pool and pool.get("pumpOn"),
@@ -393,6 +399,16 @@ def append_csv(row):
         if new_file:
             w.writerow(["timestamp", "pv_w", "load_w", "period", "price_eur_kwh", "bulb_state", "dark",
                         "pool_sun_ok", "pool_pump_on", "boiler_mode", "boiler_on"])
+        w.writerow(["" if v is None else v for v in row])
+
+
+def append_devices_csv(row):
+    new_file = not DEVICES_CSV.exists()
+    with DEVICES_CSV.open("a", newline="") as f:
+        w = csv.writer(f)
+        if new_file:
+            w.writerow(["timestamp", "boiler_on", "boiler_mode", "boiler_w", "pool_on", "wallbox_w",
+                        "inverter_temp_c", "grid_v"])
         w.writerow(["" if v is None else v for v in row])
 
 

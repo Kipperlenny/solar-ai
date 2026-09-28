@@ -91,13 +91,14 @@ PAGE = r"""<!doctype html>
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; }
+  main { max-width: 2600px; margin: 0 auto; padding: 20px 24px 40px; }
   header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
   h1 { font-size: 20px; margin: 0; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; }
   .muted { color: var(--muted); }
   .stale { color: var(--warn); font-weight: 600; }
-  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-bottom: 12px; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); margin-bottom: 12px; }
+  @media (max-width: 520px) { main { padding: 12px 12px 32px; } .grid { grid-template-columns: 1fr; } }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
   .big { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
@@ -145,9 +146,6 @@ PAGE = r"""<!doctype html>
     <div class="card"><h2>Grid</h2><div class="big" id="grid">-</div></div>
     <div class="card"><h2>Tariff</h2><div class="big" id="tariff">-</div><div class="detail" id="price"></div></div>
     <div class="card"><h2>Wallbox</h2><div class="big" id="wallbox">-</div><div class="detail" id="wallbox-detail"></div></div>
-  </div>
-
-  <div class="grid">
     <div class="card">
       <h2>Bulb</h2>
       <div class="row"><div class="swatch" id="bulb-swatch"></div><span class="state" id="bulb-state">-</span></div>
@@ -299,7 +297,7 @@ async function loadState() {
   $("wallbox").textContent = !wb.found ? "-" : wb.power_w == null ? "measuring..."
     : wb.power_w >= 100 ? `charging ${W(wb.power_w)}` : "not charging";
   $("wallbox-detail").textContent = !wb.found ? "no wallbox found in FusionSolar"
-    : `cloud counter ${wb.total_kwh?.toFixed(1) ?? "-"} kWh, updated ${wb.updated ?? "-"} (about every 2 min)`;
+    : `cloud counter ${wb.total_kwh?.toFixed(1) ?? "-"} kWh, last change ${wb.updated ?? "-"} (updates about every 2 min while charging)`;
 }
 
 const EUR = v => `${Math.round(v).toLocaleString()} €`;
