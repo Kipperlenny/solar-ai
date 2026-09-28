@@ -10,6 +10,7 @@
 [hub]
 interval_sec = 60          # how often the SDongle is read and data is pushed
 sdongle_unit = 100         # Modbus unit id of the SDongle itself
+fast_log_sec = 0           # > 0: also log PV/load/grid every n seconds to logs/fast.csv (for tests)
 
 # Electricity tariff. Defaults: Spanish 2.0TD.
 [tariff]

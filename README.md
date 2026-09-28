@@ -194,6 +194,7 @@ and fixed-date national holidays are P3).
 | `sun.py` | sun position |
 | `fusionsolar.py` | FusionSolar history, wallbox power, inverter values |
 | `bills.py` | reads the bills in bills/ |
+| `aircon.py` | air conditioner via MELCloud (read-only) |
 | `prices.py` | weekly shop prices |
 | `tools/simulate.py` | battery / extra PV / off-grid simulation, ETF comparison |
 | `docs/ML_PLAN.md` | machine learning plan (not built yet) |
@@ -205,6 +206,7 @@ and fixed-date national holidays are P3).
 | `logs/hub.log` | log, including every state change with its reason |
 | `logs/fusionsolar.csv` | 5-minute PV, consumption and grid since the grid connection |
 | `logs/wallbox.csv` | wallbox energy counter and charging power |
+| `logs/ac.csv` | air conditioner state, temperatures and power every 5 min |
 | `bills/` | electricity bills (PDF, not in git) |
 | `other/` | installation invoices, support mails (not in git) |
 | `logs/prices.csv` | shop prices over time |

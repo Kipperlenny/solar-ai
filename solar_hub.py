@@ -24,6 +24,7 @@ import requests
 from pymodbus.client import ModbusTcpClient
 from requests.auth import HTTPDigestAuth
 
+import aircon
 import bills
 import prices
 import dashboard
@@ -243,14 +244,20 @@ class Hub:
         self.bulb = Bulb()
         self.indicator = Indicator()
         self.lock = threading.Lock()
+        self.dongle_lock = threading.Lock()  # the Modbus client is shared by tick() and fast_loop()
         self.data_ts = 0
         self.started = datetime.now().isoformat(timespec="seconds")
         self.snap = {}
         self.wallbox = fusionsolar.Wallbox()
         self.inverter = fusionsolar.Inverter()
+        self.aircon = aircon.AirCon()
 
     def read_dongle(self):
         """Return (pv_w, load_w) or (None, None)."""
+        with self.dongle_lock:
+            return self._read_dongle()
+
+    def _read_dongle(self):
         try:
             if not self.client.connected and not self.client.connect():
                 log.warning("SDongle %s not reachable", self.sdongle)
@@ -328,6 +335,7 @@ class Hub:
         snap["wallbox"] = {"power_w": wb.power_w, "total_kwh": wb.kwh,
                            "updated": wb.ts and datetime.fromtimestamp(wb.ts).strftime("%H:%M:%S"),
                            "found": wb.dn is not None}
+        snap["aircon"] = dict(self.aircon.state)
         snap["inverter"] = {**self.inverter.values,
                             "updated": self.inverter.ts and self.inverter.ts.strftime("%H:%M:%S")}
         return snap
@@ -348,19 +356,69 @@ class Hub:
 
     def cloud_loop(self):
         """Wallbox power and inverter values from the FusionSolar cloud, every minute."""
+        from fusion_solar_py.exceptions import FusionSolarException
+
         charging = None
+        failures = 0
+        backoff_min = (1, 2, 5, 10, 30)  # never hammer the account with logins
         while True:
             try:
                 self.wallbox.poll()
                 self.inverter.poll(self.wallbox.client)
+                failures = 0
                 now = self.wallbox.power_w is not None and self.wallbox.power_w >= 500
                 if self.wallbox.power_w is not None and now != charging:
                     log.info("Wallbox %s: %s W", "charging" if now else "not charging", self.wallbox.power_w)
                     charging = now
+            except (FusionSolarException, requests.RequestException, ValueError) as e:
+                # the portal session expires about every 30 min; a fresh login fixes it
+                wait = backoff_min[min(failures, len(backoff_min) - 1)]
+                log.warning("FusionSolar session expired or cloud not reachable (%s), logging in again in %d min",
+                            type(e).__name__, wait)
+                self.wallbox.client = None
+                failures += 1
+                time.sleep(wait * 60)
+                continue
             except Exception:
                 log.exception("FusionSolar live poll failed")
-                self.wallbox.client = None  # log in again next time
+                self.wallbox.client = None
             time.sleep(60)
+
+    def ac_loop(self):
+        """Air conditioner state every 5 minutes (MELCloud asks for no more than once a minute)."""
+        was_on = None
+        failures = 0
+        while True:
+            try:
+                if self.aircon.poll():
+                    failures = 0
+                    s = self.aircon.state
+                    if s["on"] != was_on:
+                        log.info("Air conditioner %s (switched by you): %s, room %s °C, target %s °C",
+                                 "on" if s["on"] else "off", s["mode"], s["room_c"], s["target_c"])
+                        was_on = s["on"]
+            except Exception as e:
+                failures += 1
+                log.warning("MELCloud not reachable (%s: %s), trying again in %d min",
+                            type(e).__name__, e, 5 * min(failures, 6))
+                time.sleep(5 * 60 * (min(failures, 6) - 1))
+            time.sleep(5 * 60)
+
+    def fast_loop(self, every):
+        """For tests: PV, load and grid every few seconds to logs/fast.csv ([hub] fast_log_sec)."""
+        path = LOG_DIR / "fast.csv"
+        while True:
+            started = time.monotonic()
+            pv, load = self.read_dongle()
+            if pv is not None:
+                new_file = not path.exists()
+                with path.open("a", newline="") as f:
+                    w = csv.writer(f)
+                    if new_file:
+                        w.writerow(["timestamp", "pv_w", "load_w", "grid_w", "wallbox_w"])
+                    w.writerow([datetime.now().isoformat(timespec="seconds"), pv, load, load - pv,
+                                "" if self.wallbox.power_w is None else self.wallbox.power_w])
+            time.sleep(max(1, every - (time.monotonic() - started)))
 
     def history_loop(self):
         while True:
@@ -383,8 +441,12 @@ class Hub:
         bulb_thread = threading.Thread(target=self.bulb_loop, daemon=True)
         dashboard.serve(self, CONFIG["dashboard"]["port"], LOG_DIR / "hub.log", simulate.OUT_FILE)
         threading.Thread(target=self.history_loop, daemon=True).start()
+        if HUB.get("fast_log_sec"):
+            threading.Thread(target=self.fast_loop, args=(HUB["fast_log_sec"],), daemon=True).start()
         if os.getenv("FUSION_SOLAR_USER"):
             threading.Thread(target=self.cloud_loop, daemon=True).start()
+        if os.getenv("MELCLOUD_USER"):
+            threading.Thread(target=self.ac_loop, daemon=True).start()
         while True:
             started = time.monotonic()
             try:
@@ -423,6 +485,7 @@ def main():
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler(LOG_DIR / "hub.log", encoding="utf-8"), logging.StreamHandler()],
     )
+    logging.getLogger("fusion_solar_py").setLevel(logging.CRITICAL)  # its expected session errors, see cloud_loop
     if not os.getenv("SDONGLE_HOST"):
         raise SystemExit("SDONGLE_HOST missing - copy .env.example to .env and fill it in")
     log.info("Solar hub started")

@@ -164,6 +164,12 @@ PAGE = r"""<!doctype html>
       <p class="why" id="pool-why"></p>
     </div>
     <div class="card">
+      <h2>Air conditioner</h2>
+      <div class="row"><span class="badge" id="ac-badge">-</span><span class="state" id="ac-mode">-</span></div>
+      <div class="big" id="ac-room">-</div>
+      <div class="detail" id="ac-detail"></div>
+    </div>
+    <div class="card">
       <h2>Inverter</h2>
       <div class="row"><span class="state" id="inv-temp">-</span></div>
       <div id="inv-values"></div>
@@ -220,7 +226,7 @@ PAGE = r"""<!doctype html>
 <script>
 const $ = id => document.getElementById(id);
 const W = w => w == null ? "-" : `${Math.round(w).toLocaleString()} W`;
-const DECISION = /Bulb state|Bulb set|Boiler (on|off)|Pool (on|off)|Wallbox|FusionSolar|started|Dashboard/;
+const DECISION = /Bulb state|Bulb set|Boiler (on|off)|Pool (on|off)|Wallbox|Air conditioner|MELCloud|FusionSolar|started|Dashboard/;
 let logLines = [];
 
 function kelvinToRgb(k) {
@@ -291,6 +297,18 @@ async function loadState() {
   } else {
     $("inv-temp").textContent = "-";
     $("inv-detail").textContent = "waiting for the FusionSolar cloud";
+  }
+
+  const ac = s.aircon || {};
+  if (ac.updated) {
+    badge($("ac-badge"), ac.on ? "ON" : "OFF", ac.on ? "on" : "");
+    $("ac-mode").textContent = `${ac.mode}, target ${ac.target_c} °C`;
+    $("ac-room").textContent = `${ac.room_c} °C room`;
+    $("ac-detail").textContent = (ac.power_w != null ? `draws about ${W(ac.power_w)} - ` : "")
+      + `fan ${ac.fan}, energy counter ${ac.energy_kwh} kWh - MELCloud, updated ${ac.updated} (every 5 min). Read-only: the hub doesn't change the AC yet.`;
+  } else {
+    $("ac-mode").textContent = "-";
+    $("ac-detail").textContent = "waiting for MELCloud (or MELCLOUD_USER not set)";
   }
 
   const wb = s.wallbox;
