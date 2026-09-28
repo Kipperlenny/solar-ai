@@ -323,6 +323,7 @@ async function loadSimulation() {
   $("sim-summary").textContent = `${r.days} days of real 5-minute data (${r.first_day} to ${r.last_day}), `
     + (r.days > 365 ? "each calendar day averaged over the years logged" : `scaled to a year (${r.calendar_days} of 365 calendar days covered)`)
     + ` - calculated ${r.generated.replace("T", " ")}. PV ${KWH(r.pv_kwh_year)} kWh/year; `
+    + (r.days_without_car ? `${r.days_without_car} of these days were before the electric car: their consumption lacks the charging, so batteries and extra panels are shown a bit too low and off-grid too optimistic until the car is added to those days (ML plan step 2). ` : "")
     + `the inverter power limit cut off about ${KWH(r.clipped_ac_kwh_year)} kWh.`;
   const t = $("sim-table"); t.replaceChildren();
   t.appendChild(row([{v: "Scenario", th: 1}, {v: "Buy kWh", th: 1}, {v: "P1", th: 1}, {v: "P2", th: 1},

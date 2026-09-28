@@ -42,7 +42,10 @@ the car for the next days.
    not charging) plus power estimate, features: load level and steps, time of
    day, PV surplus. Train on the weeks with wallbox data, check against the
    wallbox's energy counter, then label
-   the history before. Metric: kWh per day vs. the counter.
+   the history before. Days recorded before there was an electric car
+   (`[car] since` in `config.local.toml`) get a synthetic charging load from
+   this model, so winters without the car don't make the average year too
+   low. Metric: kWh per day vs. the counter.
 3. **Unusual days** - residual of model 1 (actual minus forecast consumption)
    over several days; flag runs, confirm in `[[events]]`. For the inverter:
    temperature vs. power and room temperature, flag drifts.

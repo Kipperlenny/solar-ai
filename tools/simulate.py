@@ -487,6 +487,8 @@ def run():
         "export_prices": ex, "scenarios": out_scenarios, "months": out_months,
         "meter_calibration": calibration, "tariffs": tariffs,
         "events": events, "event_suggestions": suggestions, "offgrid": offgrid,
+        # [car] since in config: days of history recorded before there was an electric car
+        "days_without_car": len({r["day"] for r in rows if r["day"] < CONFIG.get("car", {}).get("since", "")}),
         "finance": SIM["finance"],
         "excluded_days": len({r["day"] for r in all_rows}) - len({r["day"] for r in rows}),
         "car": {"km_per_kwh": round(ev_km, 1),
